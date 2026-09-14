@@ -85,5 +85,5 @@
         android:layout_gravity="start|bottom"
         android:layout_margin="16dp"
         android:contentDescription="@string/common_word_refresh"
-        app:src="@drawable/ic_mtrl_refresh" />
+        app:srcCompat="@drawable/ic_mtrl_refresh" />
 </androidx.coordinatorlayout.widget.CoordinatorLayout>
