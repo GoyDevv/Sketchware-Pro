@@ -764,7 +764,7 @@ public class ProjectCodeEditorActivity extends BaseAppCompatActivity {
     }
 
     @Override
-    protected void onDestroy() {
+    public void onDestroy() {
         try {
             binding.editor.setEditorLanguage(new EmptyLanguage());
         } catch (Exception ignored) {

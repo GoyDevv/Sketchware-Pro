@@ -9,6 +9,7 @@ import android.view.Gravity;
 import android.view.Menu;
 import android.view.MenuItem;
 import android.view.View;
+import android.view.ViewGroup;
 import android.view.WindowManager;
 import android.widget.Button;
 import android.widget.PopupMenu;
@@ -109,7 +110,17 @@ public class ProjectFileExplorerActivity extends BaseAppCompatActivity {
 
         getOnBackPressedDispatcher().addCallback(this, backPressedCallback);
 
-        adapter = new ProjectFileTreeAdapter(this::onItemClicked, this::onItemLongClicked);
+        adapter = new ProjectFileTreeAdapter(new ProjectFileTreeAdapter.Listener() {
+            @Override
+            public void onItemClicked(@NonNull ProjectFileTreeAdapter.Item item) {
+                ProjectFileExplorerActivity.this.onItemClicked(item);
+            }
+
+            @Override
+            public void onItemLongClicked(@NonNull View view, @NonNull ProjectFileTreeAdapter.Item item) {
+                ProjectFileExplorerActivity.this.onItemLongClicked(view, item);
+            }
+        });
         binding.fileList.setLayoutManager(new LinearLayoutManager(this));
         binding.fileList.setAdapter(adapter);
 
@@ -137,7 +148,7 @@ public class ProjectFileExplorerActivity extends BaseAppCompatActivity {
     }
 
     @Override
-    protected void onResume() {
+    public void onResume() {
         super.onResume();
         // External changes (other managers, builds) are picked up on return.
         refresh();
