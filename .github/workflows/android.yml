@@ -56,13 +56,14 @@ jobs:
           java-version: 17
           distribution: temurin
 
-      - name: Set environmental variables
+      - name: Write google-services.json
         shell: bash
         env:
           JSON_CONTENT: ${{ secrets.GOOGLE_SERVICES_JSON }}
-        if: ${{ env.JSON_CONTENT != '' }}
         run: |
-          printf 'GOOGLE_SERVICES_JSON<<EOF\n%s\nEOF\n' "$JSON_CONTENT" >> $GITHUB_ENV
+          if [ -n "$JSON_CONTENT" ]; then
+            printf '%s' "$JSON_CONTENT" > app/google-services.json
+          fi
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v5
