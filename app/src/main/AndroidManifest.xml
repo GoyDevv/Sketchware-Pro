@@ -314,6 +314,15 @@
             android:configChanges="orientation|screenSize" />
 
         <activity
+            android:name=".activities.code.ProjectFileExplorerActivity"
+            android:configChanges="orientation|screenSize" />
+
+        <activity
+            android:name=".activities.code.ProjectCodeEditorActivity"
+            android:configChanges="orientation|screenSize|keyboardHidden|keyboard"
+            android:windowSoftInputMode="adjustResize" />
+
+        <activity
             android:name=".activities.editor.view.CodeViewerActivity"
             android:configChanges="orientation|screenSize" />
 

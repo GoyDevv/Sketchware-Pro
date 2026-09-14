@@ -116,6 +116,7 @@ import mod.jbk.util.LogUtil;
 import mod.khaled.logcat.LogReaderActivity;
 import pro.sketchware.R;
 import pro.sketchware.activities.appcompat.ManageAppCompatActivity;
+import pro.sketchware.activities.code.ProjectFileExplorerActivity;
 import pro.sketchware.activities.editor.command.ManageXMLCommandActivity;
 import pro.sketchware.activities.editor.view.CodeViewerActivity;
 import pro.sketchware.activities.editor.view.ViewCodeEditorActivity;
@@ -918,6 +919,13 @@ public class DesignActivity extends BaseAppCompatActivity implements View.OnClic
      */
     void toJavaManager() {
         launchActivity(ManageJavaActivity.class, null, new Pair<>("pkgName", q.packageName));
+    }
+
+    /**
+     * Opens {@link ProjectFileExplorerActivity} (Code Mode: browse and edit real project sources).
+     */
+    void toFilesCodeMode() {
+        launchActivity(ProjectFileExplorerActivity.class, null, new Pair<>("pkgName", q.packageName));
     }
 
     /**

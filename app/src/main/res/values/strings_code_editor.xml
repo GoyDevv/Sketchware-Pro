@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Code Mode: file explorer -->
+    <string name="text_title_menu_files">Files</string>
+    <string name="text_subtitle_menu_files">Browse project source files</string>
+    <string name="file_explorer_empty_title">No files here</string>
+    <string name="file_explorer_empty_body">Use the pencil menu above to create files and folders, or open a generated source to customize it.</string>
+    <string name="file_explorer_open_editor">Open editor</string>
+    <string name="file_explorer_menu_new_file">New file</string>
+    <string name="file_explorer_menu_new_folder">New folder</string>
+    <string name="file_explorer_badge_generated">generated</string>
+    <string name="file_explorer_badge_customized">customized</string>
+    <string name="file_explorer_customize_hint">Open the project in block mode once to generate sources.</string>
+
+    <!-- Code Mode: editor -->
+    <string name="code_editor_no_open_files_title">No file open</string>
+    <string name="code_editor_no_open_files_body">Open a file from the Files screen to start editing.</string>
+    <string name="code_editor_menu_save_all">Save all</string>
+    <string name="code_editor_menu_find_replace">Find &amp; replace</string>
+    <string name="code_editor_menu_goto_line">Go to line</string>
+    <string name="code_editor_menu_font_size">Editor font size</string>
+    <string name="code_editor_menu_symbol_pairs">Auto complete symbol pair</string>
+    <string name="code_editor_menu_select_theme">Select theme</string>
+    <string name="code_editor_menu_layout_preview">Layout preview</string>
+    <string name="code_editor_dirty_subtitle">● unsaved changes</string>
+
+    <!-- Shared words not present in strings_common.xml -->
+    <string name="common_word_rename">Rename</string>
+    <string name="common_word_refresh">Refresh</string>
+    <string name="common_word_discard">Discard</string>
+    <string name="common_word_overwrite">Overwrite</string>
+</resources>
