@@ -61,8 +61,12 @@ jobs:
         env:
           JSON_CONTENT: ${{ secrets.GOOGLE_SERVICES_JSON }}
         run: |
-          if [ -n "$JSON_CONTENT" ]; then
+          if printf '%s' "$JSON_CONTENT" | python3 -c 'import json,sys; json.load(sys.stdin)' 2>/dev/null; then
             printf '%s' "$JSON_CONTENT" > app/google-services.json
+            echo "Using GOOGLE_SERVICES_JSON secret"
+          else
+            echo '{"project_info":{"project_number":"123456789000","firebase_url":"https://mock-project-default-rtdb.firebaseio.com","project_id":"mock-project","storage_bucket":"mock-project.appspot.com"},"client":[{"client_info":{"mobilesdk_app_id":"1:123456789000:android:mockappid123456","android_client_info":{"package_name":"pro.sketchware"}},"oauth_client":[],"api_key":[{"current_key":"mock_AIzaSyBQJCUXVKUjD38-u5pWkqMtesIfFvxAcvs"}],"services":{"appinvite_service":{"other_platform_oauth_client":[]}}}],"configuration_version":"1"}' > app/google-services.json
+            echo "GOOGLE_SERVICES_JSON secret missing or invalid; using mock google-services.json"
           fi
 
       - name: Setup Gradle
