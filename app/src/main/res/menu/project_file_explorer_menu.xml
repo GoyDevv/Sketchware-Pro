@@ -13,6 +13,11 @@
         app:showAsAction="never" />
 
     <item
+        android:id="@+id/action_import"
+        android:title="@string/file_explorer_menu_import"
+        app:showAsAction="never" />
+
+    <item
         android:id="@+id/action_open_editor"
         android:title="@string/file_explorer_open_editor"
         app:showAsAction="never" />

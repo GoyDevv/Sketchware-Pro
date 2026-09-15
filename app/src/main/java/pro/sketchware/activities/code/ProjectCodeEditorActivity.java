@@ -167,14 +167,16 @@ public class ProjectCodeEditorActivity extends BaseAppCompatActivity {
         restoreSessionState();
 
         String viewName = getIntent().getStringExtra(EXTRA_VIEW_NAME);
-        if (viewName != null && !viewName.isEmpty()) {
+        String openPath = getIntent().getStringExtra(EXTRA_OPEN_PATH);
+        boolean hasOpenPath = openPath != null && !openPath.isEmpty();
+        if (viewName != null && !viewName.isEmpty() && !hasOpenPath) {
+            // Read-only preview is only used when no editable file was requested.
             showGeneratedPreview(viewName,
                     getIntent().getStringExtra(EXTRA_VIEW_KIND),
                     getIntent().getStringExtra(EXTRA_VIEW_TARGET));
         }
 
-        String openPath = getIntent().getStringExtra(EXTRA_OPEN_PATH);
-        if (openPath != null && !openPath.isEmpty() && generatedPreview == null) {
+        if (hasOpenPath) {
             int existing = indexOfSession(openPath);
             if (existing >= 0) {
                 openSessionAt(existing);
@@ -185,6 +187,19 @@ public class ProjectCodeEditorActivity extends BaseAppCompatActivity {
 
         binding.newTabButton.setOnClickListener(v -> showOpenFilePicker());
         updateEmptyState();
+        // Bring up the keyboard right away so typing works from the first tap.
+        if (generatedPreview == null && activeSessionIndex >= 0) {
+            binding.editor.postDelayed(() -> {
+                if (generatedPreview == null && activeSessionIndex >= 0 && !isFinishing()) {
+                    binding.editor.requestFocus();
+                    android.view.inputmethod.InputMethodManager imm =
+                            (android.view.inputmethod.InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+                    if (imm != null) {
+                        imm.showSoftInput(binding.editor, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT);
+                    }
+                }
+            }, 200);
+        }
     }
 
     private void configureEditor() {
@@ -319,6 +334,7 @@ public class ProjectCodeEditorActivity extends BaseAppCompatActivity {
         activeSessionIndex = index;
         SourceEditorSession session = sessions.get(index);
         applyingProgrammaticText = true;
+        binding.editor.setEditable(true);
         binding.editor.setText(session.getCurrentContent());
         binding.editor.setEditorLanguage(languageFor(session.getFileName()));
         applyColorSchemeFor(session.getFileName());
@@ -328,6 +344,10 @@ public class ProjectCodeEditorActivity extends BaseAppCompatActivity {
         tabsAdapter.notifyDataSetChanged();
         binding.editorTabs.smoothScrollToPosition(index);
         updateEmptyState();
+        // Make sure the IME can actually come up: editor must be focusable-in-touch.
+        binding.editor.setFocusable(View.FOCUSABLE);
+        binding.editor.setFocusableInTouchMode(true);
+        binding.editor.requestFocus();
     }
 
     private void closeSession(final int index) {
@@ -668,6 +688,7 @@ public class ProjectCodeEditorActivity extends BaseAppCompatActivity {
         return new EmptyLanguage();
     }
 
+    /** Color scheme logic mirrors {@link EditorUtils#loadConfigByLanguage} (dark on R+ only). */
     private void applyColorSchemeFor(@NonNull String fileName) {
         CodeEditor editor = binding.editor;
         boolean darkTheme = android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R

@@ -29,6 +29,18 @@
     <string name="file_explorer_menu_view_generated">View generated file</string>
     <string name="file_explorer_menu_customize">Customize</string>
     <string name="file_explorer_menu_reset_generated">Reset to generated</string>
+    <string name="file_explorer_menu_duplicate">Duplicate</string>
+    <string name="file_explorer_menu_paste_into">Paste into folder</string>
+    <string name="file_explorer_menu_import">Import file…</string>
+    <string name="file_explorer_menu_import_here">Import into this folder</string>
+    <string name="file_explorer_copied_toast">Copied %1$s</string>
+    <string name="file_explorer_cut_toast">Cut %1$s – paste to move</string>
+    <string name="file_explorer_duplicated_toast">Created %1$s</string>
+    <string name="file_explorer_imported_toast">Imported %1$s</string>
+    <string name="file_explorer_clipboard_empty">Clipboard is empty</string>
+    <string name="file_explorer_clipboard_gone">Clipboard file no longer exists</string>
+    <string name="file_explorer_paste_invalid">Cannot paste a folder into itself</string>
+    <string name="file_explorer_hint_copy_name">Copy name</string>
     <string name="file_explorer_customize_message">Copy %1$s into your project sources and edit it freely. Block mode stops regenerating this file while the customized copy exists. Use "Reset to generated" to return to block-mode output.</string>
     <string name="file_explorer_customized_toast">Customized %1$s</string>
     <string name="file_explorer_reset_message">Delete the customized %1$s and let block mode generate it again?</string>
@@ -66,4 +78,5 @@
     <string name="common_word_discard">Discard</string>
     <string name="common_word_overwrite">Overwrite</string>
     <string name="common_word_open">Open</string>
+    <string name="common_word_cut">Cut</string>
 </resources>

@@ -1,87 +1,74 @@
-<com.google.android.material.card.MaterialCardView xmlns:android="http://schemas.android.com/apk/res/android"
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     xmlns:tools="http://schemas.android.com/tools"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
-    android:layout_marginTop="6dp"
-    app:cardBackgroundColor="@android:color/transparent"
-    app:rippleColor="?attr/colorControlHighlight"
-    app:shapeAppearance="?attr/shapeAppearanceCornerMedium"
-    app:strokeWidth="0dp">
+    android:background="?attr/colorSurface"
+    android:foreground="?attr/selectableItemBackground"
+    android:gravity="center_vertical"
+    android:minHeight="?attr/minTouchTargetSize"
+    android:orientation="horizontal"
+    android:paddingBottom="10dp"
+    android:paddingTop="10dp">
 
-    <LinearLayout
-        android:layout_width="match_parent"
+    <View
+        android:id="@+id/indent"
+        android:layout_width="wrap_content"
+        android:layout_height="1dp" />
+
+    <ImageView
+        android:id="@+id/chevron"
+        android:layout_width="24dp"
+        android:layout_height="24dp"
+        android:layout_marginStart="8dp"
+        android:contentDescription="@null"
+        android:scaleType="fitCenter"
+        android:src="@drawable/ic_mtrl_chevron_right_24"
+        app:tint="?attr/colorOnSurfaceVariant" />
+
+    <ImageView
+        android:id="@+id/icon"
+        android:layout_width="22dp"
+        android:layout_height="22dp"
+        android:layout_marginStart="4dp"
+        android:contentDescription="@null"
+        android:scaleType="fitCenter"
+        android:src="@drawable/ic_mtrl_file"
+        app:tint="?attr/colorControlNormal" />
+
+    <TextView
+        android:id="@+id/title"
+        android:layout_width="0dp"
         android:layout_height="wrap_content"
-        android:gravity="center_vertical"
-        android:minHeight="?attr/minTouchTargetSize"
-        android:orientation="horizontal"
-        android:paddingBottom="8dp"
-        android:paddingEnd="4dp"
-        android:paddingStart="16dp"
-        android:paddingTop="8dp">
+        android:layout_marginStart="12dp"
+        android:layout_weight="1"
+        android:singleLine="true"
+        android:textAppearance="?attr/textAppearanceBodyLarge"
+        android:textColor="?attr/colorOnSurface"
+        tools:text="MainActivity.java" />
 
-        <ImageView
-            android:id="@+id/icon"
-            android:layout_width="24dp"
-            android:layout_height="24dp"
-            android:contentDescription="@null"
-            android:focusable="false"
-            android:scaleType="fitCenter"
-            android:src="@drawable/ic_mtrl_file"
-            app:tint="?attr/colorControlNormal" />
+    <TextView
+        android:id="@+id/badge"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginEnd="4dp"
+        android:background="@drawable/bg_outline_chip"
+        android:paddingHorizontal="8dp"
+        android:paddingVertical="2dp"
+        android:singleLine="true"
+        android:textAppearance="?attr/textAppearanceLabelSmall"
+        android:textColor="?attr/colorOnSurfaceVariant"
+        android:visibility="gone"
+        tools:text="generated"
+        tools:visibility="visible" />
 
-        <LinearLayout
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_marginStart="16dp"
-            android:layout_weight="1"
-            android:orientation="vertical">
-
-            <TextView
-                android:id="@+id/title"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:singleLine="true"
-                android:textAppearance="?attr/textAppearanceBodyLarge"
-                tools:text="MainActivity.java" />
-
-            <TextView
-                android:id="@+id/subtitle"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:singleLine="true"
-                android:textAppearance="?attr/textAppearanceBodySmall"
-                android:textColor="?attr/colorOnSurfaceVariant"
-                android:visibility="gone"
-                tools:text="Custom Java &amp; Kotlin sources"
-                tools:visibility="visible" />
-        </LinearLayout>
-
-        <TextView
-            android:id="@+id/badge"
-            android:layout_width="wrap_content"
-            android:longClickable="false"
-            android:layout_height="wrap_content"
-            android:layout_marginEnd="4dp"
-            android:background="@drawable/bg_outline_chip"
-            android:paddingHorizontal="8dp"
-            android:paddingVertical="2dp"
-            android:singleLine="true"
-            android:textAppearance="?attr/textAppearanceLabelSmall"
-            android:textColor="?attr/colorOnSurfaceVariant"
-            android:visibility="gone"
-            tools:text="customized"
-            tools:visibility="visible" />
-
-        <ImageView
-            android:id="@+id/more"
-            android:layout_width="38dp"
-            android:layout_height="38dp"
-            android:contentDescription="@string/file_explorer_row_actions"
-            android:focusable="true"
-            android:padding="8dp"
-            android:scaleType="fitCenter"
-            android:src="@drawable/ic_mtrl_more_vertical"
-            app:tint="?attr/colorControlNormal" />
-    </LinearLayout>
-</com.google.android.material.card.MaterialCardView>
+    <ImageView
+        android:id="@+id/more"
+        android:layout_width="38dp"
+        android:layout_height="38dp"
+        android:contentDescription="@string/file_explorer_row_actions"
+        android:padding="8dp"
+        android:scaleType="fitCenter"
+        android:src="@drawable/ic_mtrl_more_vertical"
+        app:tint="?attr/colorControlNormal" />
+</LinearLayout>

@@ -6,254 +6,255 @@ import android.view.ViewGroup;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
-import androidx.recyclerview.widget.DiffUtil;
 import androidx.recyclerview.widget.RecyclerView;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 import pro.sketchware.R;
 import pro.sketchware.databinding.ItemProjectFileExplorerBinding;
 
 /**
- * List adapter for the Code Mode file explorer. Renders section headers,
- * directories, regular files and generated project entries (activities and
- * layouts that Sketchware generates from blocks, optionally customized).
+ * Tree adapter for the Code Mode file explorer. Renders a real, collapsible
+ * hierarchy: directories with chevrons and depth indentation, files nested
+ * inside them, plus virtual entries for block-generated files that do not
+ * exist on disk yet.
  */
 public final class ProjectFileTreeAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
 
-    public static final int TYPE_HEADER = 0;
     public static final int TYPE_DIRECTORY = 1;
     public static final int TYPE_FILE = 2;
-    /** A block-generated project file entry (activity java, layout xml, manifest). */
+    /** Virtual node: block-generated file that has no on-disk copy yet. */
     public static final int TYPE_GENERATED = 3;
 
     public static final String KIND_ACTIVITY = "activity";
     public static final String KIND_LAYOUT = "layout";
-    public static final String KIND_MANIFEST = "manifest";
-    public static final String KIND_SRCVIEWER = "srcviewer";
 
-    public static final class Item {
+    public static final class Node {
         public final int type;
-        /** Absolute path of the item on disk; empty for headers and virtual entries. */
-        @NonNull
-        public final String path;
         @NonNull
         public final String title;
-        /** Optional subtitle (directory description). */
-        @Nullable
-        public final String description;
-        /** Only for {@link #TYPE_GENERATED}: absolute path of the customized copy. */
-        @Nullable
-        public final String customizedPath;
-        /** Only for {@link #TYPE_GENERATED}: {@link #KIND_ACTIVITY}, {@link #KIND_LAYOUT} or {@link #KIND_MANIFEST}. */
+        /** Absolute path; for virtual generated nodes it is the planned override target. */
+        @NonNull
+        public final String path;
+        /** Absolute path of the on-disk directory this node lives in ("" for virtual roots). */
+        @NonNull
+        public final String parentPath;
         @Nullable
         public final String generatedKind;
         public final boolean isCustomized;
-        /** Convenience flag: {@link #TYPE_GENERATED} or a flagged user file. */
-        public final boolean isGenerated;
+        public final int depth;
+        public final boolean expanded;
+        /** Child count for directories (recursive); -1 when unknown/not computed. */
+        public final int recursiveCount;
 
-        private Item(int type, @NonNull String path, @NonNull String title,
-                     @Nullable String description, @Nullable String customizedPath,
-                     @Nullable String generatedKind, boolean isCustomized, boolean isGenerated) {
+        Node(int type, @NonNull String title, @NonNull String path, @NonNull String parentPath,
+             @Nullable String generatedKind, boolean isCustomized, int depth,
+             boolean expanded, int recursiveCount) {
             this.type = type;
-            this.path = path;
             this.title = title;
-            this.description = description;
-            this.customizedPath = customizedPath;
+            this.path = path;
+            this.parentPath = parentPath;
             this.generatedKind = generatedKind;
             this.isCustomized = isCustomized;
-            this.isGenerated = isGenerated;
+            this.depth = depth;
+            this.expanded = expanded;
+            this.recursiveCount = recursiveCount;
+        }
+
+        Node withExpanded(boolean value) {
+            return new Node(type, title, path, parentPath, generatedKind, isCustomized, depth, value, recursiveCount);
         }
 
         @Override
         public boolean equals(Object o) {
             if (this == o) return true;
-            if (!(o instanceof Item)) return false;
-            Item item = (Item) o;
-            return type == item.type
-                    && isCustomized == item.isCustomized
-                    && isGenerated == item.isGenerated
-                    && path.equals(item.path)
-                    && title.equals(item.title)
-                    && java.util.Objects.equals(description, item.description)
-                    && java.util.Objects.equals(customizedPath, item.customizedPath)
-                    && java.util.Objects.equals(generatedKind, item.generatedKind);
+            if (!(o instanceof Node)) return false;
+            Node n = (Node) o;
+            return type == n.type
+                    && isCustomized == n.isCustomized
+                    && depth == n.depth
+                    && expanded == n.expanded
+                    && recursiveCount == n.recursiveCount
+                    && path.equals(n.path)
+                    && title.equals(n.title)
+                    && parentPath.equals(n.parentPath)
+                    && java.util.Objects.equals(generatedKind, n.generatedKind);
         }
 
         @Override
         public int hashCode() {
-            return java.util.Objects.hash(type, path, title, description, customizedPath, generatedKind, isCustomized, isGenerated);
+            return java.util.Objects.hash(type, path, title, parentPath, generatedKind, isCustomized, depth, expanded, recursiveCount);
         }
     }
 
-    public static Item header(@NonNull String title) {
-        return new Item(TYPE_HEADER, "", title, null, null, null, false, false);
-    }
-
-    public static Item directory(@NonNull String path, @NonNull String title, @Nullable String description) {
-        return new Item(TYPE_DIRECTORY, path, title, description, null, null, false, false);
-    }
-
-    /** Regular user-owned file; {@code customized} only drives the "customized" badge. */
-    public static Item file(@NonNull String path, @NonNull String title, boolean customized) {
-        return new Item(TYPE_FILE, path, title, null, null, null, customized, false);
-    }
-
-    public static Item generated(@NonNull String path, @NonNull String title,
-                                 @NonNull String kind, @Nullable String customizedPath,
-                                 boolean isCustomized) {
-        return new Item(TYPE_GENERATED, path, title, null, customizedPath, kind, isCustomized, true);
-    }
-
     interface Listener {
-        void onItemClicked(@NonNull Item item);
+        void onNodeClicked(@NonNull Node node);
 
-        /** Called for long-press on a row and for taps on the row's overflow button. */
-        void onItemMenuRequested(@NonNull View anchor, @NonNull Item item);
+        void onNodeMenuRequested(@NonNull View anchor, @NonNull Node node);
+
+        /** Rebuild the visible list after an expansion state change. */
+        void onExpansionChanged();
     }
 
-    private static final int VIEW_TYPE_HEADER = 1;
-    private static final int VIEW_TYPE_ROW = 2;
+    private static final int VIEW_TYPE_NODE = 1;
 
-    private final List<Item> items = new ArrayList<>();
+    private final List<Node> visible = new ArrayList<>();
+    private final List<Node> allNodes = new ArrayList<>();
     private final Listener listener;
+    private final Map<String, Boolean> expandedState = new HashMap<>();
 
     public ProjectFileTreeAdapter(@NonNull Listener listener) {
         this.listener = listener;
         setHasStableIds(false);
     }
 
-    public void submitList(@NonNull List<Item> newList) {
-        DiffUtil.DiffResult result = DiffUtil.calculateDiff(new DiffUtil.Callback() {
-            @Override
-            public int getOldListSize() {
-                return items.size();
-            }
+    /**
+     * Sets the full model (flattened hierarchical node list including hidden children)
+     * and re-applies the expansion state.
+     */
+    public void submitModel(@NonNull List<Node> model) {
+        allNodes.clear();
+        allNodes.addAll(model);
+        rebuildVisible();
+    }
 
-            @Override
-            public int getNewListSize() {
-                return newList.size();
-            }
+    /** Remembers whether a directory is expanded (persists across model updates). */
+    public void setExpanded(@NonNull String path, boolean value) {
+        expandedState.put(path, value);
+    }
 
-            @Override
-            public boolean areItemsTheSame(int oldItemPosition, int newItemPosition) {
-                Item a = items.get(oldItemPosition);
-                Item b = newList.get(newItemPosition);
-                if (a.type != b.type) {
-                    return false;
+    public boolean isExpanded(@NonNull String path) {
+        return expandedState.getOrDefault(path, false);
+    }
+
+    /** @return all directory paths currently marked expanded (for state persistence). */
+    @NonNull
+    public List<String> getExpandedPaths() {
+        List<String> out = new ArrayList<>();
+        for (Map.Entry<String, Boolean> e : expandedState.entrySet()) {
+            if (e.getValue()) {
+                out.add(e.getKey());
+            }
+        }
+        return out;
+    }
+
+    /** @return the full model (including nodes hidden by collapsed ancestors). */
+    @NonNull
+    public List<Node> currentModel() {
+        return new ArrayList<>(allNodes);
+    }
+
+    private void rebuildVisible() {
+        List<Node> result = new ArrayList<>();
+        for (int i = 0; i < allNodes.size(); i++) {
+            Node node = allNodes.get(i);
+            // The expansion map is the source of truth; model entries may be stale.
+            boolean expanded = node.type == TYPE_DIRECTORY && isExpanded(node.path);
+            if (node.type == TYPE_DIRECTORY && !expanded) {
+                // Collapse: skip its children (they directly follow until depth <= node.depth).
+                int j = i + 1;
+                while (j < allNodes.size() && allNodes.get(j).depth > node.depth) {
+                    j++;
                 }
-                if (a.type == TYPE_HEADER) {
-                    return a.title.equals(b.title);
-                }
-                return a.path.equals(b.path) && a.title.equals(b.title);
+                i = j - 1;
+                result.add(node);
+                continue;
             }
+            result.add(node);
+        }
+        visible.clear();
+        visible.addAll(result);
+        notifyDataSetChanged();
+    }
 
-            @Override
-            public boolean areContentsTheSame(int oldItemPosition, int newItemPosition) {
-                return items.get(oldItemPosition).equals(newList.get(newItemPosition));
-            }
-        });
-        items.clear();
-        items.addAll(newList);
-        result.dispatchUpdatesTo(this);
+    @NonNull
+    public List<Node> getVisibleList() {
+        return new ArrayList<>(visible);
     }
 
     @Override
     public int getItemViewType(int position) {
-        return items.get(position).type == TYPE_HEADER ? VIEW_TYPE_HEADER : VIEW_TYPE_ROW;
+        return VIEW_TYPE_NODE;
     }
 
     @NonNull
     @Override
     public RecyclerView.ViewHolder onCreateViewHolder(@NonNull ViewGroup parent, int viewType) {
-        LayoutInflater inflater = LayoutInflater.from(parent.getContext());
-        if (viewType == VIEW_TYPE_HEADER) {
-            return new TextViewHolder(inflater.inflate(R.layout.item_section_header, parent, false));
-        }
-        return new RowViewHolder(ItemProjectFileExplorerBinding.inflate(inflater, parent, false));
+        return new NodeViewHolder(ItemProjectFileExplorerBinding.inflate(
+                LayoutInflater.from(parent.getContext()), parent, false));
     }
 
     @Override
     public void onBindViewHolder(@NonNull RecyclerView.ViewHolder holder, int position) {
-        Item item = items.get(position);
-        if (holder instanceof TextViewHolder) {
-            ((TextViewHolder) holder).text.setText(item.title);
-            return;
-        }
-        RowViewHolder row = (RowViewHolder) holder;
-        row.binding.title.setText(item.title);
-        if (item.description != null) {
-            row.binding.subtitle.setVisibility(View.VISIBLE);
-            row.binding.subtitle.setText(item.description);
+        Node node = visible.get(position);
+        NodeViewHolder vh = (NodeViewHolder) holder;
+        vh.binding.title.setText(node.title);
+
+        // Chevron for directories, else a spacer to align files with folder children.
+        if (node.type == TYPE_DIRECTORY) {
+            vh.binding.chevron.setVisibility(View.VISIBLE);
+            vh.binding.chevron.setRotation(isExpanded(node.path) ? 90f : 0f);
         } else {
-            row.binding.subtitle.setVisibility(View.GONE);
+            vh.binding.chevron.setVisibility(View.INVISIBLE);
+            vh.binding.chevron.setRotation(0f);
         }
-        row.binding.icon.setImageResource(iconFor(item));
-        if (item.isGenerated && !item.isCustomized) {
-            row.binding.badge.setVisibility(View.VISIBLE);
-            row.binding.badge.setText(R.string.file_explorer_badge_generated);
-        } else if (item.isCustomized) {
-            row.binding.badge.setVisibility(View.VISIBLE);
-            row.binding.badge.setText(R.string.file_explorer_badge_customized);
+
+        int indentPx = (int) (16 * vh.binding.getRoot().getResources().getDisplayMetrics().density);
+        vh.binding.indent.setPadding(node.depth * indentPx, 0, 0, 0);
+
+        vh.binding.icon.setImageResource(iconFor(node));
+        if (node.type == TYPE_GENERATED) {
+            vh.binding.badge.setVisibility(View.VISIBLE);
+            vh.binding.badge.setText(R.string.file_explorer_badge_generated);
+        } else if (node.isCustomized) {
+            vh.binding.badge.setVisibility(View.VISIBLE);
+            vh.binding.badge.setText(R.string.file_explorer_badge_customized);
         } else {
-            row.binding.badge.setVisibility(View.GONE);
+            vh.binding.badge.setVisibility(View.GONE);
         }
-        row.binding.getRoot().setOnClickListener(v -> listener.onItemClicked(item));
-        View.OnClickListener menu = v -> listener.onItemMenuRequested(v, item);
-        row.binding.getRoot().setOnLongClickListener(v -> {
+
+        vh.binding.getRoot().setOnClickListener(v -> listener.onNodeClicked(node));
+        View.OnClickListener menu = v -> listener.onNodeMenuRequested(v, node);
+        vh.binding.getRoot().setOnLongClickListener(v -> {
             menu.onClick(v);
             return true;
         });
-        row.binding.more.setOnClickListener(menu);
+        vh.binding.more.setOnClickListener(menu);
     }
 
-    private static int iconFor(@NonNull Item item) {
-        switch (item.type) {
-            case TYPE_DIRECTORY:
-                return R.drawable.ic_mtrl_folder;
-            case TYPE_GENERATED:
-                if (KIND_MANIFEST.equals(item.generatedKind)) {
-                    return R.drawable.ic_mtrl_code;
-                }
-                if (KIND_SRCVIEWER.equals(item.generatedKind)) {
-                    return R.drawable.ic_mtrl_preview;
-                }
-                if (item.title.endsWith(".xml")) {
-                    return R.drawable.ic_mtrl_screen;
-                }
-                return R.drawable.ic_mtrl_java;
-            default:
-                String lower = item.title.toLowerCase();
-                if (lower.endsWith(".java")) {
-                    return R.drawable.ic_mtrl_java;
-                } else if (lower.endsWith(".kt") || lower.endsWith(".kts")) {
-                    return R.drawable.ic_mtrl_kotlin;
-                } else if (lower.endsWith(".xml")) {
-                    return R.drawable.ic_mtrl_code;
-                }
-                return R.drawable.ic_mtrl_file;
+    private static int iconFor(@NonNull Node node) {
+        if (node.type == TYPE_DIRECTORY) {
+            return R.drawable.ic_mtrl_folder;
         }
+        String lower = node.title.toLowerCase();
+        if (lower.endsWith(".java")) {
+            return R.drawable.ic_mtrl_java;
+        } else if (lower.endsWith(".kt") || lower.endsWith(".kts")) {
+            return R.drawable.ic_mtrl_kotlin;
+        } else if (lower.endsWith(".xml")) {
+            return R.drawable.ic_mtrl_code;
+        } else if (lower.endsWith(".png") || lower.endsWith(".jpg") || lower.endsWith(".webp")
+                || lower.endsWith(".gif") || lower.endsWith(".9.png")) {
+            return R.drawable.ic_mtrl_image;
+        } else if (lower.endsWith(".json") || lower.endsWith(".txt") || lower.endsWith(".pro")) {
+            return R.drawable.ic_mtrl_file;
+        }
+        return R.drawable.ic_mtrl_file;
     }
 
     @Override
     public int getItemCount() {
-        return items.size();
+        return visible.size();
     }
 
-    static final class TextViewHolder extends RecyclerView.ViewHolder {
-        final android.widget.TextView text;
-
-        TextViewHolder(@NonNull View itemView) {
-            super(itemView);
-            text = itemView.findViewById(R.id.section_title);
-        }
-    }
-
-    public static final class RowViewHolder extends RecyclerView.ViewHolder {
+    public static final class NodeViewHolder extends RecyclerView.ViewHolder {
         final ItemProjectFileExplorerBinding binding;
 
-        RowViewHolder(@NonNull ItemProjectFileExplorerBinding binding) {
+        NodeViewHolder(@NonNull ItemProjectFileExplorerBinding binding) {
             super(binding.getRoot());
             this.binding = binding;
         }
