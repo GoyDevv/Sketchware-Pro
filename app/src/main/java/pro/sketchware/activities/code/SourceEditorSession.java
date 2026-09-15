@@ -45,6 +45,14 @@ public final class SourceEditorSession {
     }
 
     /**
+     * Writes content to a file using the same atomic temp-file strategy as {@link #save(String)}
+     * without needing a session instance. Returns true on success.
+     */
+    public static boolean writeContent(@NonNull String filePath, @NonNull String content) {
+        return new SourceEditorSession(filePath, "", 0L).save(content);
+    }
+
+    /**
      * Reads the file and creates a session. Missing files are tolerated and treated
      * as empty documents (the editor can still be used to create content on save).
      */

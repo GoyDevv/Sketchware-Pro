@@ -17,20 +17,25 @@ import pro.sketchware.databinding.ItemProjectFileExplorerBinding;
 
 /**
  * List adapter for the Code Mode file explorer. Renders section headers,
- * directories, regular files and generated-file entries (which carry an
- * extra "customized" flag and a customize-target path).
+ * directories, regular files and generated project entries (activities and
+ * layouts that Sketchware generates from blocks, optionally customized).
  */
 public final class ProjectFileTreeAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
 
     public static final int TYPE_HEADER = 0;
     public static final int TYPE_DIRECTORY = 1;
     public static final int TYPE_FILE = 2;
-    /** A generated source file entry (activity java / layout xml / manifest). */
+    /** A block-generated project file entry (activity java, layout xml, manifest). */
     public static final int TYPE_GENERATED = 3;
+
+    public static final String KIND_ACTIVITY = "activity";
+    public static final String KIND_LAYOUT = "layout";
+    public static final String KIND_MANIFEST = "manifest";
+    public static final String KIND_SRCVIEWER = "srcviewer";
 
     public static final class Item {
         public final int type;
-        /** Absolute path of the item on disk. */
+        /** Absolute path of the item on disk; empty for headers and virtual entries. */
         @NonNull
         public final String path;
         @NonNull
@@ -41,11 +46,11 @@ public final class ProjectFileTreeAdapter extends RecyclerView.Adapter<RecyclerV
         /** Only for {@link #TYPE_GENERATED}: absolute path of the customized copy. */
         @Nullable
         public final String customizedPath;
-        /** Only for {@link #TYPE_GENERATED}: "activity/class", "layout" or "manifest". */
+        /** Only for {@link #TYPE_GENERATED}: {@link #KIND_ACTIVITY}, {@link #KIND_LAYOUT} or {@link #KIND_MANIFEST}. */
         @Nullable
         public final String generatedKind;
         public final boolean isCustomized;
-        /** Convenience flag: TYPE_GENERATED or a flagged file. */
+        /** Convenience flag: {@link #TYPE_GENERATED} or a flagged user file. */
         public final boolean isGenerated;
 
         private Item(int type, @NonNull String path, @NonNull String title,
@@ -104,7 +109,8 @@ public final class ProjectFileTreeAdapter extends RecyclerView.Adapter<RecyclerV
     interface Listener {
         void onItemClicked(@NonNull Item item);
 
-        void onItemLongClicked(@NonNull View view, @NonNull Item item);
+        /** Called for long-press on a row and for taps on the row's overflow button. */
+        void onItemMenuRequested(@NonNull View anchor, @NonNull Item item);
     }
 
     private static final int VIEW_TYPE_HEADER = 1;
@@ -140,7 +146,7 @@ public final class ProjectFileTreeAdapter extends RecyclerView.Adapter<RecyclerV
                 if (a.type == TYPE_HEADER) {
                     return a.title.equals(b.title);
                 }
-                return a.path.equals(b.path);
+                return a.path.equals(b.path) && a.title.equals(b.title);
             }
 
             @Override
@@ -163,9 +169,7 @@ public final class ProjectFileTreeAdapter extends RecyclerView.Adapter<RecyclerV
     public RecyclerView.ViewHolder onCreateViewHolder(@NonNull ViewGroup parent, int viewType) {
         LayoutInflater inflater = LayoutInflater.from(parent.getContext());
         if (viewType == VIEW_TYPE_HEADER) {
-            TextViewHolder holder = new TextViewHolder(inflater,
-                    android.R.layout.simple_list_item_1, parent, true);
-            return holder;
+            return new TextViewHolder(inflater.inflate(R.layout.item_section_header, parent, false));
         }
         return new RowViewHolder(ItemProjectFileExplorerBinding.inflate(inflater, parent, false));
     }
@@ -188,18 +192,20 @@ public final class ProjectFileTreeAdapter extends RecyclerView.Adapter<RecyclerV
         row.binding.icon.setImageResource(iconFor(item));
         if (item.isGenerated && !item.isCustomized) {
             row.binding.badge.setVisibility(View.VISIBLE);
-            row.binding.badge.setText("generated");
+            row.binding.badge.setText(R.string.file_explorer_badge_generated);
         } else if (item.isCustomized) {
             row.binding.badge.setVisibility(View.VISIBLE);
-            row.binding.badge.setText("customized");
+            row.binding.badge.setText(R.string.file_explorer_badge_customized);
         } else {
             row.binding.badge.setVisibility(View.GONE);
         }
         row.binding.getRoot().setOnClickListener(v -> listener.onItemClicked(item));
+        View.OnClickListener menu = v -> listener.onItemMenuRequested(v, item);
         row.binding.getRoot().setOnLongClickListener(v -> {
-            listener.onItemLongClicked(v, item);
+            menu.onClick(v);
             return true;
         });
+        row.binding.more.setOnClickListener(menu);
     }
 
     private static int iconFor(@NonNull Item item) {
@@ -207,9 +213,14 @@ public final class ProjectFileTreeAdapter extends RecyclerView.Adapter<RecyclerV
             case TYPE_DIRECTORY:
                 return R.drawable.ic_mtrl_folder;
             case TYPE_GENERATED:
+                if (KIND_MANIFEST.equals(item.generatedKind)) {
+                    return R.drawable.ic_mtrl_code;
+                }
+                if (KIND_SRCVIEWER.equals(item.generatedKind)) {
+                    return R.drawable.ic_mtrl_preview;
+                }
                 if (item.title.endsWith(".xml")) {
-                    return "layout".equals(item.generatedKind)
-                            ? R.drawable.ic_mtrl_screen : R.drawable.ic_mtrl_code;
+                    return R.drawable.ic_mtrl_screen;
                 }
                 return R.drawable.ic_mtrl_java;
             default:
@@ -233,18 +244,9 @@ public final class ProjectFileTreeAdapter extends RecyclerView.Adapter<RecyclerV
     static final class TextViewHolder extends RecyclerView.ViewHolder {
         final android.widget.TextView text;
 
-        TextViewHolder(@NonNull LayoutInflater inflater, int resource,
-                       @NonNull ViewGroup parent, boolean header) {
-            super(inflater.inflate(resource, parent, false));
-            text = itemView.findViewById(android.R.id.text1);
-            if (text != null) {
-                text.setAllCaps(true);
-                text.setTextSize(12f);
-                int pad = (int) (itemView.getResources().getDisplayMetrics().density * 12);
-                text.setPadding(pad, header ? pad : pad / 2, pad, pad / 2);
-                text.setTextColor(itemView.getResources()
-                        .getColor(pro.sketchware.R.color.design_default_color_secondary, null));
-            }
+        TextViewHolder(@NonNull View itemView) {
+            super(itemView);
+            text = itemView.findViewById(R.id.section_title);
         }
     }
 

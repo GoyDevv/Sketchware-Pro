@@ -15,6 +15,12 @@
         app:showAsAction="always" />
 
     <item
+        android:id="@+id/action_customize_generated"
+        android:icon="@drawable/ic_mtrl_save_as"
+        android:title="@string/file_explorer_menu_customize"
+        app:showAsAction="always" />
+
+    <item
         android:id="@+id/action_save"
         android:title="@string/common_word_save"
         android:icon="@drawable/ic_mtrl_save"
@@ -33,6 +39,16 @@
     <item
         android:id="@+id/action_goto_line"
         android:title="@string/code_editor_menu_goto_line"
+        app:showAsAction="never" />
+
+    <item
+        android:id="@+id/action_duplicate_line"
+        android:title="@string/code_editor_menu_duplicate_line"
+        app:showAsAction="never" />
+
+    <item
+        android:id="@+id/action_format"
+        android:title="@string/code_editor_menu_format"
         app:showAsAction="never" />
 
     <item

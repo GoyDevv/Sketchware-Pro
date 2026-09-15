@@ -32,10 +32,10 @@ import java.lang.reflect.Type;
 import java.util.ArrayList;
 import java.util.List;
 
+import io.github.rosemoe.sora.event.SelectionChangeEvent;
 import io.github.rosemoe.sora.lang.EmptyLanguage;
 import io.github.rosemoe.sora.lang.Language;
 import io.github.rosemoe.sora.langs.java.JavaLanguage;
-import io.github.rosemoe.sora.langs.textmate.TextMateColorScheme;
 import io.github.rosemoe.sora.text.ContentListener;
 import io.github.rosemoe.sora.widget.CodeEditor;
 import io.github.rosemoe.sora.widget.component.EditorAutoCompletion;
@@ -49,6 +49,7 @@ import pro.sketchware.activities.preview.LayoutPreviewActivity;
 import pro.sketchware.databinding.ActivityProjectCodeEditorBinding;
 import pro.sketchware.databinding.ItemEditorTabBinding;
 import pro.sketchware.utility.EditorUtils;
+import pro.sketchware.utility.FileUtil;
 import pro.sketchware.utility.SketchwareUtil;
 import pro.sketchware.utility.ThemeUtils;
 
@@ -65,18 +66,29 @@ import pro.sketchware.utility.ThemeUtils;
  * Multiple files can be open at once (tabs). Unsaved changes are preserved when
  * switching tabs, and the open-file list survives process death; unsaved content
  * is persisted on {@link #onStop()} and offered for restoration on reopen.
+ * <p>
+ * The activity also hosts a read-only preview mode for block-generated files
+ * (activities/layouts that only exist as block metadata): the generated source is
+ * shown and can be materialized into the user-owned tree via "Customize".
  */
 public class ProjectCodeEditorActivity extends BaseAppCompatActivity {
 
     public static final String EXTRA_SC_ID = "sc_id";
     /** Optional: open this absolute path directly on launch. */
     public static final String EXTRA_OPEN_PATH = "open_path";
+    /** Optional: view a generated file by name (read-only preview). */
+    public static final String EXTRA_VIEW_NAME = "view_name";
+    /** Optional: "java" or "layout"; describes {@link #EXTRA_VIEW_NAME}. */
+    public static final String EXTRA_VIEW_KIND = "view_kind";
+    /** Optional: absolute path the customized copy should be written to. */
+    public static final String EXTRA_VIEW_TARGET = "view_target";
 
     private static final String PREFS_NAME = "project_code_editor";
     private static final String KEY_FONT_SIZE = "font_size";
     private static final String KEY_WORD_WRAP = "word_wrap";
     private static final String KEY_AUTO_COMPLETE = "auto_complete";
     private static final String KEY_SYMBOL_PAIRS = "symbol_pairs";
+    private static final String KEY_STICKY_SCROLL = "sticky_scroll";
     private static final String KEY_OPEN_FILES = "open_files_";
     private static final String KEY_ACTIVE_FILE = "active_file_";
     private static final String KEY_CURSOR = "cursor_";
@@ -95,10 +107,17 @@ public class ProjectCodeEditorActivity extends BaseAppCompatActivity {
     private EditorTabsAdapter tabsAdapter;
     /** True while a programmatic {@link CodeEditor#setText} runs, so the listener ignores it. */
     private boolean applyingProgrammaticText;
+    /** Non-null while previewing a block-generated file (read-only mode). */
+    private GeneratedPreview generatedPreview;
 
     private final OnBackPressedCallback backPressedCallback = new OnBackPressedCallback(true) {
         @Override
         public void handleOnBackPressed() {
+            if (generatedPreview != null) {
+                // Leaving the preview always returns to the previously edited file.
+                dismissGeneratedPreview();
+                return;
+            }
             mirrorActiveContent();
             if (hasAnyDirtySession()) {
                 promptBeforeClosing();
@@ -125,7 +144,13 @@ public class ProjectCodeEditorActivity extends BaseAppCompatActivity {
         prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
 
         setSupportActionBar(binding.toolbar);
-        binding.toolbar.setNavigationOnClickListener(v -> getOnBackPressedDispatcher().onBackPressed());
+        binding.toolbar.setNavigationOnClickListener(v -> {
+            if (generatedPreview != null) {
+                dismissGeneratedPreview();
+            } else {
+                getOnBackPressedDispatcher().onBackPressed();
+            }
+        });
 
         getOnBackPressedDispatcher().addCallback(this, backPressedCallback);
 
@@ -133,13 +158,23 @@ public class ProjectCodeEditorActivity extends BaseAppCompatActivity {
         binding.editorTabs.setLayoutManager(
                 new LinearLayoutManager(this, LinearLayoutManager.HORIZONTAL, false));
         binding.editorTabs.setAdapter(tabsAdapter);
+        binding.editorTabs.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_YES);
 
         configureEditor();
         binding.editor.getText().addContentListener(contentListener);
+        binding.editor.subscribeEvent(SelectionChangeEvent.class, (event, unsubscribe) ->
+                updateCursorPosition());
         restoreSessionState();
 
+        String viewName = getIntent().getStringExtra(EXTRA_VIEW_NAME);
+        if (viewName != null && !viewName.isEmpty()) {
+            showGeneratedPreview(viewName,
+                    getIntent().getStringExtra(EXTRA_VIEW_KIND),
+                    getIntent().getStringExtra(EXTRA_VIEW_TARGET));
+        }
+
         String openPath = getIntent().getStringExtra(EXTRA_OPEN_PATH);
-        if (openPath != null && !openPath.isEmpty()) {
+        if (openPath != null && !openPath.isEmpty() && generatedPreview == null) {
             int existing = indexOfSession(openPath);
             if (existing >= 0) {
                 openSessionAt(existing);
@@ -147,6 +182,8 @@ public class ProjectCodeEditorActivity extends BaseAppCompatActivity {
                 openFile(openPath);
             }
         }
+
+        binding.newTabButton.setOnClickListener(v -> showOpenFilePicker());
         updateEmptyState();
     }
 
@@ -160,8 +197,17 @@ public class ProjectCodeEditorActivity extends BaseAppCompatActivity {
         editor.setTextSize(clampFontSize(prefs.getInt(KEY_FONT_SIZE, DEFAULT_FONT_SIZE_SP)));
         editor.setWordwrap(prefs.getBoolean(KEY_WORD_WRAP, false));
         editor.getProps().symbolPairAutoCompletion = prefs.getBoolean(KEY_SYMBOL_PAIRS, true);
-        editor.getComponent(EditorAutoCompletion.class).setEnabled(prefs.getBoolean(KEY_AUTO_COMPLETE, true));
+        editor.getProps().stickyScroll = prefs.getBoolean(KEY_STICKY_SCROLL, true);
         editor.setPinLineNumber(true);
+        editor.setHighlightBracketPair(true);
+        editor.setTabWidth(4);
+        editor.getComponent(EditorAutoCompletion.class).setEnabled(prefs.getBoolean(KEY_AUTO_COMPLETE, true));
+
+        binding.symbolInput.bindEditor(editor);
+        binding.symbolInput.addSymbols(
+                new String[]{"→", "(", ")", "{", "}", ";", "\"", "'", ".", ","},
+                new String[]{"\t", "()", ")", "}", "{", ";", "\"", "'", ".", ","});
+        binding.symbolInput.setTextColor(0xFF8E8E8E);
     }
 
     private final ContentListener contentListener = new ContentListener() {
@@ -195,6 +241,18 @@ public class ProjectCodeEditorActivity extends BaseAppCompatActivity {
             tabsAdapter.notifyItemChanged(activeSessionIndex);
             updateTitle();
         }
+        updateCursorPosition();
+    }
+
+    private void updateCursorPosition() {
+        if (activeSessionIndex < 0 || generatedPreview != null) {
+            binding.cursorPosition.setVisibility(View.GONE);
+            return;
+        }
+        var cursor = binding.editor.getCursor();
+        binding.cursorPosition.setVisibility(View.VISIBLE);
+        binding.cursorPosition.setText(getString(R.string.code_editor_cursor_position,
+                cursor.getLeftLine() + 1, cursor.getLeftColumn()));
     }
 
     private int clampFontSize(int size) {
@@ -252,6 +310,9 @@ public class ProjectCodeEditorActivity extends BaseAppCompatActivity {
         if (index < 0 || index >= sessions.size()) {
             return;
         }
+        if (generatedPreview != null) {
+            dismissGeneratedPreview();
+        }
         if (activeSessionIndex != index) {
             mirrorActiveContent();
         }
@@ -265,6 +326,7 @@ public class ProjectCodeEditorActivity extends BaseAppCompatActivity {
         restoreCursorFor(session.getFilePath());
         updateTitle();
         tabsAdapter.notifyDataSetChanged();
+        binding.editorTabs.smoothScrollToPosition(index);
         updateEmptyState();
     }
 
@@ -340,7 +402,7 @@ public class ProjectCodeEditorActivity extends BaseAppCompatActivity {
                             SketchwareUtil.toastError("Failed to save " + session.getFileName());
                         }
                     })
-                    .setNegativeButton("Reload", (dialog, which) -> {
+                    .setNegativeButton(R.string.common_word_discard, (dialog, which) -> {
                         String reloaded = session.reloadFromDisk();
                         if (reloaded != null && index == activeSessionIndex) {
                             applyingProgrammaticText = true;
@@ -409,6 +471,185 @@ public class ProjectCodeEditorActivity extends BaseAppCompatActivity {
 
     //endregion
 
+    //region Generated-file preview (read-only) with customize
+
+    /** State of the read-only generated-file preview, if one is shown. */
+    private static final class GeneratedPreview {
+        final String name;
+        final String kind;
+        @Nullable
+        final String overrideTarget;
+
+        GeneratedPreview(@NonNull String name, @Nullable String kind, @Nullable String overrideTarget) {
+            this.name = name;
+            this.kind = kind == null ? "java" : kind;
+            this.overrideTarget = overrideTarget;
+        }
+    }
+
+    /**
+     * Generates the requested block-mode file on a worker thread and shows it read-only.
+     */
+    private void showGeneratedPreview(@NonNull String name, @Nullable String kind,
+                                      @Nullable String overrideTarget) {
+        generatedPreview = new GeneratedPreview(name, kind, overrideTarget);
+        binding.tabsRow.setVisibility(View.GONE);
+        binding.editor.setEditable(false);
+        binding.editor.setText("");
+        binding.toolbar.setTitle(name);
+        binding.toolbar.setSubtitle(getString(R.string.code_editor_generated_subtitle));
+        invalidateOptionsMenu();
+        updateEmptyState();
+        k(); // show loading dialog (base class)
+
+        String requestedName = name;
+        new Thread(() -> {
+            String content = "";
+            try {
+                var yq = new a.a.a.yq(getApplicationContext(), scId);
+                content = yq.getFileSrc(requestedName, a.a.a.jC.b(scId), a.a.a.jC.a(scId), a.a.a.jC.c(scId));
+            } catch (Exception e) {
+                content = "";
+            }
+            String finalContent = content == null ? "" : content;
+            runOnUiThread(() -> {
+                if (isFinishing() || isDestroyed() || generatedPreview == null
+                        || !generatedPreview.name.equals(requestedName)) {
+                    return;
+                }
+                h(); // hide loading dialog (base class)
+                applyingProgrammaticText = true;
+                binding.editor.setText(finalContent);
+                applyingProgrammaticText = false;
+                binding.editor.setEditorLanguage(languageFor(requestedName));
+                applyColorSchemeFor(requestedName);
+                binding.editor.setEditable(false);
+            });
+        }, "GeneratedSourceLoad").start();
+    }
+
+    private void dismissGeneratedPreview() {
+        generatedPreview = null;
+        binding.editor.setEditable(true);
+        invalidateOptionsMenu();
+        updateEmptyState();
+        if (activeSessionIndex >= 0 && activeSessionIndex < sessions.size()) {
+            openSessionAt(activeSessionIndex);
+        } else if (!sessions.isEmpty()) {
+            openSessionAt(0);
+        } else {
+            applyingProgrammaticText = true;
+            binding.editor.setText("");
+            applyingProgrammaticText = false;
+            binding.editor.setEditorLanguage(new EmptyLanguage());
+            updateTitle();
+        }
+    }
+
+    private void customizeCurrentPreview() {
+        if (generatedPreview == null || generatedPreview.overrideTarget == null) {
+            return;
+        }
+        String targetPath = generatedPreview.overrideTarget;
+        String title = generatedPreview.name;
+        new MaterialAlertDialogBuilder(this)
+                .setTitle(R.string.file_explorer_menu_customize)
+                .setMessage(getString(R.string.file_explorer_customize_message, title))
+                .setPositiveButton(R.string.file_explorer_menu_customize, (dialog, which) -> {
+                    File target = new File(targetPath);
+                    File parent = target.getParentFile();
+                    if (parent != null && !parent.exists() && !parent.mkdirs()) {
+                        SketchwareUtil.toastError("Could not create target directory");
+                        return;
+                    }
+                    String content = binding.editor.getText().toString();
+                    if (!SourceEditorSession.writeContent(targetPath, content)) {
+                        SketchwareUtil.toastError("Could not customize " + title);
+                        return;
+                    }
+                    ProjectFileCatalog catalog = ProjectFileCatalog.load(scId);
+                    catalog.markCustomized(
+                            toFilesRelative(scId, targetPath),
+                            "",
+                            title);
+                    SketchwareUtil.toast(getString(R.string.file_explorer_customized_toast, title));
+                    Intent intent = new Intent(getApplicationContext(), ProjectCodeEditorActivity.class);
+                    intent.putExtra(EXTRA_SC_ID, scId);
+                    intent.putExtra(EXTRA_OPEN_PATH, targetPath);
+                    intent.setFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP);
+                    startActivity(intent);
+                    finish();
+                })
+                .setNegativeButton(R.string.common_word_cancel, null)
+                .show();
+    }
+
+    //endregion
+
+    //region Open-file picker ("+" button)
+
+    private void showOpenFilePicker() {
+        // Recursively collect project source files under the user-owned tree.
+        File root = new File(FileUtil.getExternalStorageDir(), ".sketchware/data/" + scId + "/files");
+        List<String> paths = new ArrayList<>();
+        collectFiles(root, paths, 0);
+        if (paths.isEmpty()) {
+            SketchwareUtil.toast("No files yet. Create one in the Files screen.");
+            return;
+        }
+        paths.sort((a, b) -> a.compareToIgnoreCase(b));
+        String[] labels = new String[paths.size()];
+        for (int i = 0; i < paths.size(); i++) {
+            String p = paths.get(i).replace('\\', '/');
+            int idx = p.indexOf("/files/");
+            labels[i] = idx >= 0 ? p.substring(idx + "/files/".length()) : p;
+        }
+        new MaterialAlertDialogBuilder(this)
+                .setTitle(R.string.code_editor_open_file)
+                .setItems(labels, (dialog, which) -> openFile(paths.get(which)))
+                .setNegativeButton(R.string.common_word_cancel, null)
+                .show();
+    }
+
+    /**
+     * Converts an absolute path under .sketchware/data/&lt;sc_id&gt;/files into the sc-relative
+     * form the catalog uses ("files/&lt;relative&gt;"). Falls back to the absolute path.
+     */
+    @NonNull
+    private static String toFilesRelative(@NonNull String scId, @NonNull String absolutePath) {
+        String filesRoot = new File(FileUtil.getExternalStorageDir(),
+                ".sketchware/data/" + scId + "/files").getAbsolutePath();
+        String path = absolutePath.replace('\\', '/');
+        String root = filesRoot.replace('\\', '/');
+        if (path.startsWith(root)) {
+            String relative = path.substring(root.length());
+            if (relative.startsWith("/")) {
+                relative = relative.substring(1);
+            }
+            return "files/" + relative;
+        }
+        return absolutePath;
+    }
+
+    private static void collectFiles(@NonNull File dir, @NonNull List<String> out, int depth) {
+        if (depth > 6) {
+            return;
+        }
+        File[] children = dir.listFiles();
+        if (children == null) {
+            return;
+        }
+        for (File child : children) {
+            if (child.isFile()) {
+                out.add(child.getAbsolutePath());
+            } else if (child.isDirectory()) {
+                collectFiles(child, out, depth + 1);
+            }
+        }
+    }
+
+    //endregion
+
     //region Language / colors
 
     @NonNull
@@ -461,10 +702,14 @@ public class ProjectCodeEditorActivity extends BaseAppCompatActivity {
     }
 
     private void updateEmptyState() {
-        boolean empty = sessions.isEmpty();
+        boolean previewing = generatedPreview != null;
+        boolean empty = sessions.isEmpty() && !previewing;
         binding.editor.setVisibility(empty ? View.GONE : View.VISIBLE);
-        binding.editorTabs.setVisibility(empty ? View.GONE : View.VISIBLE);
+        boolean showTabs = !previewing && !sessions.isEmpty();
+        binding.tabsRow.setVisibility(showTabs ? View.VISIBLE : View.GONE);
         binding.noFilesLayout.setVisibility(empty ? View.VISIBLE : View.GONE);
+        binding.symbolInput.setVisibility(!previewing && !sessions.isEmpty() ? View.VISIBLE : View.GONE);
+        updateCursorPosition();
     }
 
     //endregion
@@ -489,7 +734,7 @@ public class ProjectCodeEditorActivity extends BaseAppCompatActivity {
         String activePath = (activeSessionIndex >= 0 && activeSessionIndex < sessions.size())
                 ? sessions.get(activeSessionIndex).getFilePath() : "";
         StringBuilder cursor = new StringBuilder();
-        if (activeSessionIndex >= 0) {
+        if (activeSessionIndex >= 0 && generatedPreview == null) {
             cursor.append(binding.editor.getCursor().getLeftLine())
                     .append(':').append(binding.editor.getCursor().getLeftColumn());
         }
@@ -611,8 +856,26 @@ public class ProjectCodeEditorActivity extends BaseAppCompatActivity {
 
     @Override
     public boolean onPrepareOptionsMenu(@NonNull Menu menu) {
+        boolean previewing = generatedPreview != null;
+        MenuItem customize = menu.findItem(R.id.action_customize_generated);
+        if (customize != null) {
+            customize.setVisible(previewing && generatedPreview.overrideTarget != null);
+        }
+        int[] editingOnly = {
+                R.id.action_save, R.id.action_save_all, R.id.action_find_replace,
+                R.id.action_goto_line, R.id.action_duplicate_line, R.id.action_format,
+                R.id.action_font_size, R.id.action_word_wrap, R.id.action_autocomplete,
+                R.id.action_autocomplete_symbol_pair, R.id.action_select_theme,
+                R.id.action_layout_preview
+        };
+        for (int id : editingOnly) {
+            MenuItem item = menu.findItem(id);
+            if (item != null) {
+                item.setVisible(!previewing);
+            }
+        }
         MenuItem preview = menu.findItem(R.id.action_layout_preview);
-        if (preview != null) {
+        if (preview != null && !previewing) {
             preview.setVisible(isLayoutFile());
         }
         return super.onPrepareOptionsMenu(menu);
@@ -622,7 +885,10 @@ public class ProjectCodeEditorActivity extends BaseAppCompatActivity {
     @Override
     public boolean onOptionsItemSelected(@NonNull MenuItem item) {
         int itemId = item.getItemId();
-        if (itemId == R.id.action_undo) {
+        if (itemId == R.id.action_customize_generated) {
+            customizeCurrentPreview();
+            return true;
+        } else if (itemId == R.id.action_undo) {
             binding.editor.undo();
             return true;
         } else if (itemId == R.id.action_redo) {
@@ -642,6 +908,12 @@ public class ProjectCodeEditorActivity extends BaseAppCompatActivity {
             return true;
         } else if (itemId == R.id.action_goto_line) {
             showGotoLineDialog();
+            return true;
+        } else if (itemId == R.id.action_duplicate_line) {
+            binding.editor.duplicateLine();
+            return true;
+        } else if (itemId == R.id.action_format) {
+            binding.editor.formatCodeAsync();
             return true;
         } else if (itemId == R.id.action_font_size) {
             showFontSizeDialog();
@@ -713,6 +985,7 @@ public class ProjectCodeEditorActivity extends BaseAppCompatActivity {
                         int max = Math.max(binding.editor.getText().getLineCount() - 1, 0);
                         binding.editor.setSelection(Math.max(0, Math.min(line, max)), 0);
                         binding.editor.ensureSelectionVisible();
+                        updateCursorPosition();
                     } catch (NumberFormatException ignored) {
                     }
                 })
@@ -758,8 +1031,10 @@ public class ProjectCodeEditorActivity extends BaseAppCompatActivity {
     @Override
     protected void onStop() {
         // Persist open tabs and unsaved content so an OS kill loses at most one keystroke.
-        mirrorActiveContent();
-        persistSessionState();
+        if (prefs != null && generatedPreview == null) {
+            mirrorActiveContent();
+            persistSessionState();
+        }
         super.onStop();
     }
 
@@ -792,7 +1067,7 @@ public class ProjectCodeEditorActivity extends BaseAppCompatActivity {
             holder.binding.tabTitle.setText(session.getFileName());
             boolean dirty = session.isDirty();
             holder.binding.tabDirty.setVisibility(dirty ? View.VISIBLE : View.GONE);
-            boolean active = position == activeSessionIndex;
+            boolean active = position == activeSessionIndex && generatedPreview == null;
             holder.binding.getRoot().setActivated(active);
             holder.binding.tabTitle.setTypeface(null, active ? Typeface.BOLD : Typeface.NORMAL);
             holder.binding.getRoot().setOnClickListener(v -> openSessionAt(position));

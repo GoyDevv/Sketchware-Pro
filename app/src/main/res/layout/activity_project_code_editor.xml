@@ -20,17 +20,44 @@
             tools:subtitle="● unsaved changes"
             tools:title="MainActivity.java" />
 
-        <androidx.recyclerview.widget.RecyclerView
-            android:id="@+id/editor_tabs"
+        <LinearLayout
+            android:id="@+id/tabs_row"
             android:layout_width="match_parent"
             android:layout_height="40dp"
             android:background="?attr/colorSurfaceContainer"
-            android:clipToPadding="false"
-            android:orientation="horizontal"
-            android:paddingHorizontal="4dp"
-            android:scrollbars="none"
-            app:layoutManager="androidx.recyclerview.widget.LinearLayoutManager"
-            tools:listitem="@layout/item_editor_tab" />
+            android:orientation="horizontal">
+
+            <androidx.recyclerview.widget.RecyclerView
+                android:id="@+id/editor_tabs"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1"
+                android:clipToPadding="false"
+                android:paddingHorizontal="4dp"
+                android:scrollbars="none"
+                app:layoutManager="androidx.recyclerview.widget.LinearLayoutManager"
+                tools:listitem="@layout/item_editor_tab" />
+
+            <ImageButton
+                android:id="@+id/new_tab_button"
+                android:layout_width="40dp"
+                android:layout_height="match_parent"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:contentDescription="@string/code_editor_open_file"
+                android:src="@drawable/ic_mtrl_add"
+                app:tint="?attr/colorControlNormal" />
+
+            <TextView
+                android:id="@+id/cursor_position"
+                android:layout_width="wrap_content"
+                android:layout_height="match_parent"
+                android:gravity="center_vertical"
+                android:layout_marginEnd="12dp"
+                android:singleLine="true"
+                android:textAppearance="?attr/textAppearanceLabelSmall"
+                android:textColor="?attr/colorOnSurfaceVariant"
+                tools:text="Ln 12, Col 4" />
+        </LinearLayout>
 
         <com.google.android.material.divider.MaterialDivider
             android:layout_width="match_parent"
@@ -41,12 +68,21 @@
     <io.github.rosemoe.sora.widget.CodeEditor
         android:id="@+id/editor"
         android:layout_width="match_parent"
-        android:layout_height="match_parent" />
+        android:layout_height="0dp"
+        android:layout_weight="1" />
+
+    <io.github.rosemoe.sora.widget.SymbolInputView
+        android:id="@+id/symbol_input"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="?attr/colorSurfaceContainer"
+        android:visibility="gone" />
 
     <LinearLayout
         android:id="@+id/no_files_layout"
         android:layout_width="match_parent"
-        android:layout_height="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
         android:background="?attr/colorSurface"
         android:gravity="center"
         android:orientation="vertical"

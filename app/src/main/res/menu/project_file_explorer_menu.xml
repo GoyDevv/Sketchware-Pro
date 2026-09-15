@@ -18,6 +18,11 @@
         app:showAsAction="never" />
 
     <item
+        android:id="@+id/action_view_all_sources"
+        android:title="@string/file_explorer_menu_view_all_sources"
+        app:showAsAction="never" />
+
+    <item
         android:id="@+id/action_refresh"
         android:title="@string/common_word_refresh"
         android:icon="@drawable/ic_mtrl_refresh"

@@ -47,10 +47,14 @@ public final class ProjectFileCatalog {
 
     private final File catalogFile;
     private final List<Entry> entries;
+    /** sc_id the catalog belongs to; used to resolve sc-relative paths. */
+    @Nullable
+    private final String scId;
 
-    private ProjectFileCatalog(File catalogFile, List<Entry> entries) {
+    private ProjectFileCatalog(File catalogFile, List<Entry> entries, @Nullable String scId) {
         this.catalogFile = catalogFile;
         this.entries = entries;
+        this.scId = scId;
     }
 
     @NonNull
@@ -77,7 +81,7 @@ public final class ProjectFileCatalog {
                 entries.clear();
             }
         }
-        return new ProjectFileCatalog(store, entries);
+        return new ProjectFileCatalog(store, entries, scId);
     }
 
     /** Marks a generated file as customized. Does nothing if already tracked. */
@@ -128,7 +132,12 @@ public final class ProjectFileCatalog {
 
     @NonNull
     private String absolute(@NonNull String scRelativePath) {
-        return new File(FileUtil.getExternalStorageDir(), ".sketchware/data/" + scRelativePath).getAbsolutePath();
+        // scRelativePath is relative to .sketchware/data/<sc_id>/ (e.g. "files/java/Foo.java").
+        if (scId != null) {
+            return new File(FileUtil.getExternalStorageDir(),
+                    ".sketchware/data/" + scId + "/" + scRelativePath).getAbsolutePath();
+        }
+        return scRelativePath;
     }
 
     private void save() {

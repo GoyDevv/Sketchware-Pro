@@ -21,23 +21,16 @@
             app:subtitle="@string/text_subtitle_menu_files" />
     </com.google.android.material.appbar.AppBarLayout>
 
-    <LinearLayout
-        android:id="@+id/contentLayout"
+    <androidx.recyclerview.widget.RecyclerView
+        android:id="@+id/fileList"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
-        android:orientation="vertical"
-        app:layout_behavior="@string/appbar_scrolling_view_behavior">
-
-        <androidx.recyclerview.widget.RecyclerView
-            android:id="@+id/fileList"
-            android:layout_width="match_parent"
-            android:layout_height="match_parent"
-            android:clipToPadding="false"
-            android:paddingBottom="24dp"
-            android:paddingTop="4dp"
-            app:layoutManager="androidx.recyclerview.widget.LinearLayoutManager"
-            tools:listitem="@layout/item_project_file_explorer" />
-    </LinearLayout>
+        android:clipToPadding="false"
+        android:paddingBottom="88dp"
+        android:paddingTop="4dp"
+        app:layout_behavior="@string/appbar_scrolling_view_behavior"
+        app:layoutManager="androidx.recyclerview.widget.LinearLayoutManager"
+        tools:listitem="@layout/item_project_file_explorer" />
 
     <LinearLayout
         android:id="@+id/noFilesLayout"
@@ -77,13 +70,4 @@
         android:layout_margin="16dp"
         android:text="@string/file_explorer_open_editor"
         app:icon="@drawable/ic_mtrl_code" />
-
-    <com.google.android.material.floatingactionbutton.FloatingActionButton
-        android:id="@+id/refreshButton"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_gravity="start|bottom"
-        android:layout_margin="16dp"
-        android:contentDescription="@string/common_word_refresh"
-        app:srcCompat="@drawable/ic_mtrl_refresh" />
 </androidx.coordinatorlayout.widget.CoordinatorLayout>
