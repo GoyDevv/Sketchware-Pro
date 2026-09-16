@@ -19,6 +19,9 @@ import android.widget.FrameLayout;
 import androidx.activity.OnBackPressedCallback;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
+import androidx.core.graphics.Insets;
+import androidx.core.view.ViewCompat;
+import androidx.core.view.WindowInsetsCompat;
 import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
 
@@ -154,7 +157,15 @@ public class ProjectCodeEditorActivity extends BaseAppCompatActivity {
         // own content, while the bottom inset keeps the symbol bar clear of the
         // navigation bar. Both come from the real insets, never fixed offsets.
         UI.addSystemWindowInsetToPadding(binding.appBarLayout, true, true, true, false);
-        UI.addSystemWindowInsetToPadding(binding.getRoot(), false, false, false, true);
+        // The bottom inset is dropped while the keyboard is up, otherwise a gap
+        // would sit between the symbol bar and the IME.
+        ViewCompat.setOnApplyWindowInsetsListener(binding.getRoot(), (v, insets) -> {
+            Insets bars = insets.getInsets(
+                    WindowInsetsCompat.Type.systemBars() | WindowInsetsCompat.Type.displayCutout());
+            boolean imeVisible = insets.isVisible(WindowInsetsCompat.Type.ime());
+            v.setPadding(0, 0, 0, imeVisible ? 0 : bars.bottom);
+            return insets;
+        });
 
         setSupportActionBar(binding.toolbar);
         // Routing through the dispatcher keeps the "unsaved generated edits"
