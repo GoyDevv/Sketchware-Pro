@@ -23,6 +23,7 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 
 import pro.sketchware.R;
 import pro.sketchware.databinding.ItemProjectFileExplorerBinding;
@@ -51,8 +52,11 @@ public final class ProjectFileTreeAdapter extends RecyclerView.Adapter<RecyclerV
      */
     public static final int TYPE_GENERATED = 2;
 
-    public static final String KIND_ACTIVITY = "activity";
-    public static final String KIND_LAYOUT = "layout";
+    /**
+     * {@code AndroidManifest.xml}: generated from project metadata, so it has no
+     * override file and is edited through Sketchware's manifest editor instead.
+     * Other generated kinds come from {@link ProjectSourceIndex}.
+     */
     public static final String KIND_MANIFEST = "manifest";
 
     /** Supplies the children of a directory. Implementations may do file I/O. */
@@ -98,6 +102,8 @@ public final class ProjectFileTreeAdapter extends RecyclerView.Adapter<RecyclerV
         public int depth;
         /** Expansion snapshot, kept in sync while flattening (used for diffing). */
         public boolean expanded;
+        /** Whether a listing for this (directory) node is in flight; used for diffing. */
+        public boolean loading;
 
         public Node(int type, @NonNull String name, @NonNull String path,
                     @Nullable String generatedKind, boolean customized, int childCount) {
@@ -120,9 +126,27 @@ public final class ProjectFileTreeAdapter extends RecyclerView.Adapter<RecyclerV
         }
     }
 
+    /**
+     * How long a single directory listing may take before it is considered stuck.
+     * A listing that never reports back would otherwise leave its row spinning
+     * forever, so the watchdog clears it and lets it be retried.
+     */
+    private static final long LOAD_TIMEOUT_MS = 10_000L;
+
+    /**
+     * How many times one directory may fail to list before the tree accepts it as
+     * empty. Without this cap a directory that always throws would be retried on
+     * every render, which reads as a folder that loads forever.
+     */
+    private static final int MAX_LOAD_ATTEMPTS = 3;
+
     private final Listener listener;
     private final ChildrenProvider childrenProvider;
-    private final ExecutorService executor = Executors.newSingleThreadExecutor();
+    /**
+     * A small pool rather than a single thread: one slow listing (project metadata
+     * decryption, a huge folder) must not queue up every other folder behind it.
+     */
+    private final ExecutorService executor = Executors.newFixedThreadPool(2);
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
 
     /** Children per directory path; a present key means "already loaded". */
@@ -131,6 +155,10 @@ public final class ProjectFileTreeAdapter extends RecyclerView.Adapter<RecyclerV
     private final Set<String> expandedPaths = new LinkedHashSet<>();
     /** Directories whose listing is in flight (rendered with a spinner). */
     private final Set<String> loadingPaths = new LinkedHashSet<>();
+    /** When each in-flight listing started, for the stuck-listing watchdog. */
+    private final Map<String, Long> loadStartedAt = new HashMap<>();
+    /** Failed listing attempts per directory, bounded by {@link #MAX_LOAD_ATTEMPTS}. */
+    private final Map<String, Integer> loadAttempts = new HashMap<>();
     /** The flattened, visible rows. */
     private final List<Node> visible = new ArrayList<>();
     /** Set once the host activity is destroyed; stops further background work. */
@@ -180,6 +208,8 @@ public final class ProjectFileTreeAdapter extends RecyclerView.Adapter<RecyclerV
     public void invalidateAndReload() {
         childrenCache.clear();
         loadingPaths.clear();
+        loadStartedAt.clear();
+        loadAttempts.clear();
         if (root != null) {
             render();
         }
@@ -188,6 +218,8 @@ public final class ProjectFileTreeAdapter extends RecyclerView.Adapter<RecyclerV
     /** Drops the cached listing of one directory and re-renders it. */
     public void invalidate(@NonNull String directory) {
         childrenCache.remove(directory);
+        // A refresh is an explicit retry, so start its attempt count over.
+        loadAttempts.remove(directory);
         if (root != null) {
             render();
         }
@@ -202,6 +234,8 @@ public final class ProjectFileTreeAdapter extends RecyclerView.Adapter<RecyclerV
         expandedPaths.removeIf(path -> path.equals(directory) || path.startsWith(prefix));
         loadingPaths.removeIf(path -> path.equals(directory) || path.startsWith(prefix));
         childrenCache.keySet().removeIf(path -> path.equals(directory) || path.startsWith(prefix));
+        loadStartedAt.keySet().removeIf(path -> path.equals(directory) || path.startsWith(prefix));
+        loadAttempts.keySet().removeIf(path -> path.equals(directory) || path.startsWith(prefix));
     }
 
     /** Whether {@code path} is currently expanded. */
@@ -231,6 +265,9 @@ public final class ProjectFileTreeAdapter extends RecyclerView.Adapter<RecyclerV
         shutDown = true;
         executor.shutdownNow();
         mainHandler.removeCallbacksAndMessages(null);
+        loadingPaths.clear();
+        loadStartedAt.clear();
+        loadAttempts.clear();
     }
 
     //endregion
@@ -260,10 +297,24 @@ public final class ProjectFileTreeAdapter extends RecyclerView.Adapter<RecyclerV
     private void render() {
         // 1. Every expanded directory must be cached or loading, so rows can show
         //    either their children or a spinner - never a silently empty folder.
+        long now = System.currentTimeMillis();
         for (String path : new ArrayList<>(expandedPaths)) {
-            if (!childrenCache.containsKey(path) && loadingPaths.add(path)) {
-                scheduleLoad(path);
+            if (childrenCache.containsKey(path)) {
+                continue;
             }
+            Long startedAt = loadStartedAt.get(path);
+            if (loadingPaths.contains(path)) {
+                // Watchdog: a listing that never came back must not spin forever.
+                if (startedAt != null && now - startedAt > LOAD_TIMEOUT_MS) {
+                    loadingPaths.remove(path);
+                    loadStartedAt.remove(path);
+                } else {
+                    continue;
+                }
+            }
+            loadingPaths.add(path);
+            loadStartedAt.put(path, now);
+            scheduleLoad(path);
         }
 
         // 2. Flatten root -> expanded children, assigning depth as we go.
@@ -289,31 +340,62 @@ public final class ProjectFileTreeAdapter extends RecyclerView.Adapter<RecyclerV
         if (shutDown) {
             return;
         }
-        executor.execute(() -> {
-            List<Node> children;
-            try {
-                children = childrenProvider.childrenOf(directory);
-            } catch (Exception e) {
-                children = new ArrayList<>();
-            }
-            List<Node> result = children;
-            if (shutDown) {
-                return;
-            }
-            mainHandler.post(() -> {
+        try {
+            executor.execute(() -> {
+                List<Node> children;
+                boolean failed = false;
+                try {
+                    children = childrenProvider.childrenOf(directory);
+                } catch (Throwable t) {
+                    // Errors as well as exceptions: an unexpectedly empty folder beats
+                    // a row that spins until the screen closes.
+                    children = new ArrayList<>();
+                    failed = true;
+                }
                 if (shutDown) {
                     return;
                 }
-                loadingPaths.remove(directory);
-                childrenCache.put(directory, result);
-                render();
+                List<Node> result = children;
+                boolean hadFailure = failed;
+                mainHandler.post(() -> finishLoad(directory, result, hadFailure));
             });
-        });
+        } catch (RejectedExecutionException e) {
+            // The pool is gone (activity destroyed): never leave a spinner behind.
+            loadingPaths.remove(directory);
+            loadStartedAt.remove(directory);
+            return;
+        }
+        // Re-render after the deadline so the watchdog above actually runs.
+        mainHandler.postDelayed(this::render, LOAD_TIMEOUT_MS + 500L);
+    }
+
+    /** Applies a finished listing and re-renders. Always clears the spinner state. */
+    private void finishLoad(@NonNull String directory, @NonNull List<Node> children,
+                            boolean failed) {
+        if (shutDown) {
+            return;
+        }
+        loadingPaths.remove(directory);
+        loadStartedAt.remove(directory);
+        if (failed) {
+            int attempts = loadAttempts.merge(directory, 1, Integer::sum);
+            if (attempts >= MAX_LOAD_ATTEMPTS) {
+                // Give up and settle: a cached empty listing cannot keep spinning.
+                loadAttempts.remove(directory);
+                childrenCache.put(directory, new ArrayList<>());
+            }
+            render();
+            return;
+        }
+        loadAttempts.remove(directory);
+        childrenCache.put(directory, children);
+        render();
     }
 
     private void flatten(@NonNull Node node, int depth, @NonNull List<Node> out) {
         node.depth = depth;
         node.expanded = node.isDirectory() && expandedPaths.contains(node.path);
+        node.loading = loadingPaths.contains(node.path);
         out.add(node);
         if (!node.expanded) {
             return;
@@ -344,7 +426,7 @@ public final class ProjectFileTreeAdapter extends RecyclerView.Adapter<RecyclerV
         Node node = visible.get(position);
         NodeViewHolder vh = (NodeViewHolder) holder;
         boolean expanded = node.expanded;
-        boolean loading = loadingPaths.contains(node.path);
+        boolean loading = node.loading;
 
         vh.binding.title.setText(node.name);
 
@@ -449,12 +531,16 @@ public final class ProjectFileTreeAdapter extends RecyclerView.Adapter<RecyclerV
         public boolean areContentsTheSame(int oldPos, int newPos) {
             Node a = oldList.get(oldPos);
             Node b = newList.get(newPos);
+            // The loading flag is part of the row's appearance (it swaps the chevron
+            // for a spinner), so a row whose listing just finished must be re-bound -
+            // otherwise a stale spinner stays next to its freshly shown children.
             return a.type == b.type
                     && a.depth == b.depth
                     && a.expanded == b.expanded
                     && a.customized == b.customized
                     && a.childCount == b.childCount
                     && a.name.equals(b.name)
+                    && a.loading == b.loading
                     && Objects.equals(a.generatedKind, b.generatedKind);
         }
     }

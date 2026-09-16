@@ -24,6 +24,16 @@
             app:title="@string/text_title_menu_files"
             app:titleTextAppearance="?attr/textAppearanceTitleMedium" />
 
+        <!-- Visible while the project's generated sources are being resolved. -->
+        <com.google.android.material.progressindicator.LinearProgressIndicator
+            android:id="@+id/progress"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:visibility="gone"
+            app:indicatorColor="?attr/colorPrimary"
+            app:trackColor="?attr/colorSurfaceContainerHighest"
+            tools:visibility="visible" />
+
         <com.google.android.material.divider.MaterialDivider
             android:layout_width="match_parent"
             android:layout_height="wrap_content"

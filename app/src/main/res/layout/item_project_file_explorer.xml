@@ -1,91 +1,114 @@
-<?xml version="1.0" encoding="utf-8"?>
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<?xml version="1.0" encoding="utf-8"?><!--
+  File-tree row. Follows the app's own manager-row recipe
+  (see manage_java_item_hs.xml): a transparent MaterialCardView with the medium
+  corner shape and a ripple, wrapping a row that is at least one touch target
+  tall. Tree-specific extras are the depth indent, the chevron/spinner slot and
+  the trailing state chip.
+-->
+<com.google.android.material.card.MaterialCardView xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     xmlns:tools="http://schemas.android.com/tools"
     android:layout_width="match_parent"
-    android:layout_height="?attr/minTouchTargetSize"
-    android:background="?attr/selectableItemBackground"
-    android:gravity="center_vertical"
-    android:orientation="horizontal"
-    android:paddingEnd="2dp"
-    tools:ignore="ContentDescription">
+    android:layout_height="wrap_content"
+    android:layout_marginTop="4dp"
+    android:layout_marginStart="8dp"
+    android:layout_marginEnd="8dp"
+    app:cardBackgroundColor="@android:color/transparent"
+    app:rippleColor="?attr/colorControlHighlight"
+    app:shapeAppearance="?attr/shapeAppearanceCornerMedium"
+    app:strokeWidth="0dp">
 
-    <!-- Depth indentation: width is set per row so the real hierarchy is visible. -->
-    <View
-        android:id="@+id/indent"
-        android:layout_width="0dp"
-        android:layout_height="1dp" />
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center_vertical"
+        android:minHeight="?attr/minTouchTargetSize"
+        android:orientation="horizontal"
+        android:paddingVertical="6dp"
+        android:paddingEnd="8dp"
+        android:paddingStart="8dp"
+        tools:ignore="ContentDescription">
 
-    <FrameLayout
-        android:layout_width="28dp"
-        android:layout_height="28dp"
-        android:layout_marginStart="8dp">
+        <!-- Depth indentation: the width is set per row, so the real hierarchy shows. -->
+        <View
+            android:id="@+id/indent"
+            android:layout_width="0dp"
+            android:layout_height="1dp" />
+
+        <FrameLayout
+            android:layout_width="28dp"
+            android:layout_height="28dp">
+
+            <ImageView
+                android:id="@+id/chevron"
+                android:layout_width="20dp"
+                android:layout_height="20dp"
+                android:layout_gravity="center"
+                android:alpha="0.7"
+                android:focusable="false"
+                android:scaleType="fitCenter"
+                android:src="@drawable/ic_mtrl_chevron_right_24"
+                app:tint="?attr/colorOnSurfaceVariant" />
+
+            <ProgressBar
+                android:id="@+id/progress"
+                style="?android:attr/progressBarStyleSmall"
+                android:layout_width="16dp"
+                android:layout_height="16dp"
+                android:layout_gravity="center"
+                android:indeterminateTint="?attr/colorPrimary"
+                android:visibility="gone"
+                tools:visibility="gone" />
+        </FrameLayout>
 
         <ImageView
-            android:id="@+id/chevron"
-            android:layout_width="18dp"
-            android:layout_height="18dp"
-            android:layout_gravity="center"
-            android:alpha="0.7"
+            android:id="@+id/icon"
+            android:layout_width="24dp"
+            android:layout_height="24dp"
+            android:layout_marginStart="8dp"
+            android:focusable="false"
             android:scaleType="fitCenter"
-            android:src="@drawable/ic_mtrl_chevron_right_24"
+            android:src="@drawable/ic_mtrl_file"
             app:tint="?attr/colorOnSurfaceVariant" />
 
-        <ProgressBar
-            android:id="@+id/progress"
-            style="?android:attr/progressBarStyleSmall"
-            android:layout_width="14dp"
-            android:layout_height="14dp"
-            android:layout_gravity="center"
-            android:indeterminateTint="?attr/colorPrimary"
+        <TextView
+            android:id="@+id/title"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="12dp"
+            android:layout_weight="1"
+            android:ellipsize="middle"
+            android:singleLine="true"
+            android:textAppearance="?attr/textAppearanceBodyLarge"
+            android:textColor="?attr/colorOnSurface"
+            tools:text="MainActivity.java" />
+
+        <TextView
+            android:id="@+id/badge"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:background="@drawable/bg_outline_chip"
+            android:paddingHorizontal="8dp"
+            android:paddingVertical="2dp"
+            android:singleLine="true"
+            android:textAppearance="?attr/textAppearanceLabelSmall"
+            android:textColor="?attr/colorOnSurfaceVariant"
             android:visibility="gone"
-            tools:visibility="gone" />
-    </FrameLayout>
+            tools:text="generated"
+            tools:visibility="visible" />
 
-    <ImageView
-        android:id="@+id/icon"
-        android:layout_width="20dp"
-        android:layout_height="20dp"
-        android:layout_marginStart="6dp"
-        android:scaleType="fitCenter"
-        android:src="@drawable/ic_mtrl_file"
-        app:tint="?attr/colorOnSurfaceVariant" />
-
-    <TextView
-        android:id="@+id/title"
-        android:layout_width="0dp"
-        android:layout_height="wrap_content"
-        android:layout_marginStart="12dp"
-        android:layout_weight="1"
-        android:ellipsize="middle"
-        android:singleLine="true"
-        android:textAppearance="?attr/textAppearanceBodyMedium"
-        android:textColor="?attr/colorOnSurface"
-        tools:text="MainActivity.java" />
-
-    <TextView
-        android:id="@+id/badge"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_marginStart="8dp"
-        android:background="@drawable/bg_outline_chip"
-        android:paddingHorizontal="8dp"
-        android:paddingVertical="2dp"
-        android:singleLine="true"
-        android:textAppearance="?attr/textAppearanceLabelSmall"
-        android:textColor="?attr/colorOnSurfaceVariant"
-        android:visibility="gone"
-        tools:text="generated"
-        tools:visibility="visible" />
-
-    <ImageButton
-        android:id="@+id/more"
-        android:layout_width="40dp"
-        android:layout_height="40dp"
-        android:background="?attr/selectableItemBackgroundBorderless"
-        android:contentDescription="@string/file_explorer_row_actions"
-        android:padding="10dp"
-        android:scaleType="fitCenter"
-        android:src="@drawable/ic_mtrl_more_vertical"
-        app:tint="?attr/colorOnSurfaceVariant" />
-</LinearLayout>
+        <ImageButton
+            android:id="@+id/more"
+            android:layout_width="38dp"
+            android:layout_height="38dp"
+            android:layout_marginStart="4dp"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:contentDescription="@string/file_explorer_row_actions"
+            android:focusable="false"
+            android:padding="8dp"
+            android:scaleType="fitCenter"
+            android:src="@drawable/ic_mtrl_more_vertical"
+            app:tint="?attr/colorControlNormal" />
+    </LinearLayout>
+</com.google.android.material.card.MaterialCardView>

@@ -82,8 +82,6 @@ public class ProjectCodeEditorActivity extends BaseAppCompatActivity {
     public static final String EXTRA_OPEN_PATH = "open_path";
     /** Optional: view a generated file by name (read-only preview). */
     public static final String EXTRA_VIEW_NAME = "view_name";
-    /** Optional: "java" or "layout"; describes {@link #EXTRA_VIEW_NAME}. */
-    public static final String EXTRA_VIEW_KIND = "view_kind";
     /** Optional: absolute path the customized copy should be written to. */
     public static final String EXTRA_VIEW_TARGET = "view_target";
 
@@ -192,9 +190,7 @@ public class ProjectCodeEditorActivity extends BaseAppCompatActivity {
         boolean hasOpenPath = openPath != null && !openPath.isEmpty();
         if (viewName != null && !viewName.isEmpty() && !hasOpenPath) {
             // Read-only preview is only used when no editable file was requested.
-            showGeneratedPreview(viewName,
-                    getIntent().getStringExtra(EXTRA_VIEW_KIND),
-                    getIntent().getStringExtra(EXTRA_VIEW_TARGET));
+            showGeneratedPreview(viewName, getIntent().getStringExtra(EXTRA_VIEW_TARGET));
         }
 
         if (hasOpenPath) {
@@ -524,16 +520,14 @@ public class ProjectCodeEditorActivity extends BaseAppCompatActivity {
 
     //region Generated-file preview (read-only) with customize
 
-    /** State of the read-only generated-file preview, if one is shown. */
-    private static final class GeneratedPreview {
+    /** State of the read-only generated-file preview, if one is shown. */    private static final class GeneratedPreview {
+
         final String name;
-        final String kind;
         @Nullable
         final String overrideTarget;
 
-        GeneratedPreview(@NonNull String name, @Nullable String kind, @Nullable String overrideTarget) {
+        GeneratedPreview(@NonNull String name, @Nullable String overrideTarget) {
             this.name = name;
-            this.kind = kind == null ? "java" : kind;
             this.overrideTarget = overrideTarget;
         }
     }
@@ -544,9 +538,8 @@ public class ProjectCodeEditorActivity extends BaseAppCompatActivity {
      * user's copy, which also stops block mode regenerating it. Nothing is locked:
      * a generated file is immediately typeable.
      */
-    private void showGeneratedPreview(@NonNull String name, @Nullable String kind,
-                                      @Nullable String overrideTarget) {
-        generatedPreview = new GeneratedPreview(name, kind, overrideTarget);
+    private void showGeneratedPreview(@NonNull String name, @Nullable String overrideTarget) {
+        generatedPreview = new GeneratedPreview(name, overrideTarget);
         previewDirty = false;
         binding.tabsRow.setVisibility(View.GONE);
         binding.editor.setEditable(true);
