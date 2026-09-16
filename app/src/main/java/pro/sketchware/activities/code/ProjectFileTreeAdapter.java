@@ -159,6 +159,12 @@ public final class ProjectFileTreeAdapter extends RecyclerView.Adapter<RecyclerV
     private final Map<String, Long> loadStartedAt = new HashMap<>();
     /** Failed listing attempts per directory, bounded by {@link #MAX_LOAD_ATTEMPTS}. */
     private final Map<String, Integer> loadAttempts = new HashMap<>();
+    /**
+     * Whether the stuck-listing watchdog is already queued. One pending check is
+     * enough for every in-flight listing, so opening a deep tree does not queue a
+     * delayed render per folder.
+     */
+    private boolean watchdogScheduled;
     /** The flattened, visible rows. */
     private final List<Node> visible = new ArrayList<>();
     /** Set once the host activity is destroyed; stops further background work. */
@@ -268,6 +274,7 @@ public final class ProjectFileTreeAdapter extends RecyclerView.Adapter<RecyclerV
         loadingPaths.clear();
         loadStartedAt.clear();
         loadAttempts.clear();
+        watchdogScheduled = false;
     }
 
     //endregion
@@ -316,6 +323,7 @@ public final class ProjectFileTreeAdapter extends RecyclerView.Adapter<RecyclerV
             loadStartedAt.put(path, now);
             scheduleLoad(path);
         }
+        scheduleWatchdog();
 
         // 2. Flatten root -> expanded children, assigning depth as we go.
         List<Node> flattened = new ArrayList<>();
@@ -363,10 +371,19 @@ public final class ProjectFileTreeAdapter extends RecyclerView.Adapter<RecyclerV
             // The pool is gone (activity destroyed): never leave a spinner behind.
             loadingPaths.remove(directory);
             loadStartedAt.remove(directory);
+        }
+    }
+
+    /** Queues the single stuck-listing check that lets the watchdog run. */
+    private void scheduleWatchdog() {
+        if (shutDown || watchdogScheduled || loadingPaths.isEmpty()) {
             return;
         }
-        // Re-render after the deadline so the watchdog above actually runs.
-        mainHandler.postDelayed(this::render, LOAD_TIMEOUT_MS + 500L);
+        watchdogScheduled = true;
+        mainHandler.postDelayed(() -> {
+            watchdogScheduled = false;
+            render();
+        }, LOAD_TIMEOUT_MS + 500L);
     }
 
     /** Applies a finished listing and re-renders. Always clears the spinner state. */
