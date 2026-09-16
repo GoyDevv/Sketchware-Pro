@@ -52,6 +52,7 @@ import pro.sketchware.utility.EditorUtils;
 import pro.sketchware.utility.FileUtil;
 import pro.sketchware.utility.SketchwareUtil;
 import pro.sketchware.utility.ThemeUtils;
+import pro.sketchware.utility.UI;
 
 /**
  * Code Mode editor: edits the real project source files of a Sketchware Pro project
@@ -107,15 +108,21 @@ public class ProjectCodeEditorActivity extends BaseAppCompatActivity {
     private EditorTabsAdapter tabsAdapter;
     /** True while a programmatic {@link CodeEditor#setText} runs, so the listener ignores it. */
     private boolean applyingProgrammaticText;
-    /** Non-null while previewing a block-generated file (read-only mode). */
+    /** Non-null while a block-generated file is open in the buffer. */
     private GeneratedPreview generatedPreview;
+    /** True once the buffer of a generated file was edited but not saved yet. */
+    private boolean previewDirty;
 
     private final OnBackPressedCallback backPressedCallback = new OnBackPressedCallback(true) {
         @Override
         public void handleOnBackPressed() {
             if (generatedPreview != null) {
-                // Leaving the preview always returns to the previously edited file.
-                dismissGeneratedPreview();
+                if (previewDirty) {
+                    confirmDiscardGeneratedEdits();
+                } else {
+                    // Leaving always returns to the previously edited file.
+                    dismissGeneratedPreview();
+                }
                 return;
             }
             mirrorActiveContent();
@@ -143,14 +150,17 @@ public class ProjectCodeEditorActivity extends BaseAppCompatActivity {
         }
         prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
 
+        // Edge-to-edge insets: the app bar paints behind the status bar and pads its
+        // own content, while the bottom inset keeps the symbol bar clear of the
+        // navigation bar. Both come from the real insets, never fixed offsets.
+        UI.addSystemWindowInsetToPadding(binding.appBarLayout, true, true, true, false);
+        UI.addSystemWindowInsetToPadding(binding.getRoot(), false, false, false, true);
+
         setSupportActionBar(binding.toolbar);
-        binding.toolbar.setNavigationOnClickListener(v -> {
-            if (generatedPreview != null) {
-                dismissGeneratedPreview();
-            } else {
-                getOnBackPressedDispatcher().onBackPressed();
-            }
-        });
+        // Routing through the dispatcher keeps the "unsaved generated edits"
+        // guard in one place for both the arrow and the system back gesture.
+        binding.toolbar.setNavigationOnClickListener(v ->
+                getOnBackPressedDispatcher().onBackPressed());
 
         getOnBackPressedDispatcher().addCallback(this, backPressedCallback);
 
@@ -246,9 +256,19 @@ public class ProjectCodeEditorActivity extends BaseAppCompatActivity {
     };
 
     private void onEditorContentChanged() {
-        if (applyingProgrammaticText
-                || activeSessionIndex < 0
-                || activeSessionIndex >= sessions.size()) {
+        if (applyingProgrammaticText) {
+            return;
+        }
+        if (generatedPreview != null) {
+            // Unsaved copy of a generated file: make that obvious in the title bar.
+            if (!previewDirty) {
+                previewDirty = true;
+                binding.toolbar.setSubtitle(getString(R.string.code_editor_generated_dirty_subtitle));
+            }
+            updateCursorPosition();
+            return;
+        }
+        if (activeSessionIndex < 0 || activeSessionIndex >= sessions.size()) {
             return;
         }
         if (!sessions.get(activeSessionIndex).isModified()) {
@@ -260,7 +280,7 @@ public class ProjectCodeEditorActivity extends BaseAppCompatActivity {
     }
 
     private void updateCursorPosition() {
-        if (activeSessionIndex < 0 || generatedPreview != null) {
+        if (activeSessionIndex < 0 && generatedPreview == null) {
             binding.cursorPosition.setVisibility(View.GONE);
             return;
         }
@@ -508,13 +528,17 @@ public class ProjectCodeEditorActivity extends BaseAppCompatActivity {
     }
 
     /**
-     * Generates the requested block-mode file on a worker thread and shows it read-only.
+     * Generates a block-mode file on a worker thread and opens it in an editable
+     * buffer. Saving that buffer writes it into the project's own source tree as the
+     * user's copy, which also stops block mode regenerating it. Nothing is locked:
+     * a generated file is immediately typeable.
      */
     private void showGeneratedPreview(@NonNull String name, @Nullable String kind,
                                       @Nullable String overrideTarget) {
         generatedPreview = new GeneratedPreview(name, kind, overrideTarget);
+        previewDirty = false;
         binding.tabsRow.setVisibility(View.GONE);
-        binding.editor.setEditable(false);
+        binding.editor.setEditable(true);
         binding.editor.setText("");
         binding.toolbar.setTitle(name);
         binding.toolbar.setSubtitle(getString(R.string.code_editor_generated_subtitle));
@@ -543,13 +567,18 @@ public class ProjectCodeEditorActivity extends BaseAppCompatActivity {
                 applyingProgrammaticText = false;
                 binding.editor.setEditorLanguage(languageFor(requestedName));
                 applyColorSchemeFor(requestedName);
-                binding.editor.setEditable(false);
+                binding.editor.setEditable(true);
+                binding.editor.setFocusable(View.FOCUSABLE);
+                binding.editor.setFocusableInTouchMode(true);
+                binding.editor.requestFocus();
+                updateEmptyState();
             });
         }, "GeneratedSourceLoad").start();
     }
 
     private void dismissGeneratedPreview() {
         generatedPreview = null;
+        previewDirty = false;
         binding.editor.setEditable(true);
         invalidateOptionsMenu();
         updateEmptyState();
@@ -566,42 +595,60 @@ public class ProjectCodeEditorActivity extends BaseAppCompatActivity {
         }
     }
 
-    private void customizeCurrentPreview() {
-        if (generatedPreview == null || generatedPreview.overrideTarget == null) {
+    /** Asks what to do with an edited but unsaved generated-file buffer. */
+    private void confirmDiscardGeneratedEdits() {
+        new MaterialAlertDialogBuilder(this)
+                .setTitle(Helper.getResString(R.string.common_word_warning))
+                .setMessage(getString(R.string.code_editor_generated_unsaved_message,
+                        generatedPreview.name))
+                .setPositiveButton(R.string.common_word_save, (dialog, which) -> saveGeneratedPreview())
+                .setNegativeButton(R.string.common_word_discard, (dialog, which) -> dismissGeneratedPreview())
+                .setNeutralButton(R.string.common_word_cancel, null)
+                .show();
+    }
+
+    /**
+     * Commits the edited buffer of a block-generated file into the project as the
+     * user's own file. From then on it is an ordinary session, and the build reads
+     * this file instead of regenerating it.
+     */
+    private void saveGeneratedPreview() {
+        GeneratedPreview preview = generatedPreview;
+        if (preview == null) {
             return;
         }
-        String targetPath = generatedPreview.overrideTarget;
-        String title = generatedPreview.name;
-        new MaterialAlertDialogBuilder(this)
-                .setTitle(R.string.file_explorer_menu_customize)
-                .setMessage(getString(R.string.file_explorer_customize_message, title))
-                .setPositiveButton(R.string.file_explorer_menu_customize, (dialog, which) -> {
-                    File target = new File(targetPath);
-                    File parent = target.getParentFile();
-                    if (parent != null && !parent.exists() && !parent.mkdirs()) {
-                        SketchwareUtil.toastError("Could not create target directory");
-                        return;
-                    }
-                    String content = binding.editor.getText().toString();
-                    if (!SourceEditorSession.writeContent(targetPath, content)) {
-                        SketchwareUtil.toastError("Could not customize " + title);
-                        return;
-                    }
-                    ProjectFileCatalog catalog = ProjectFileCatalog.load(scId);
-                    catalog.markCustomized(
-                            toFilesRelative(scId, targetPath),
-                            "",
-                            title);
-                    SketchwareUtil.toast(getString(R.string.file_explorer_customized_toast, title));
-                    Intent intent = new Intent(getApplicationContext(), ProjectCodeEditorActivity.class);
-                    intent.putExtra(EXTRA_SC_ID, scId);
-                    intent.putExtra(EXTRA_OPEN_PATH, targetPath);
-                    intent.setFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP);
-                    startActivity(intent);
-                    finish();
-                })
-                .setNegativeButton(R.string.common_word_cancel, null)
-                .show();
+        if (preview.overrideTarget == null || preview.overrideTarget.isEmpty()) {
+            SketchwareUtil.toastError(getString(R.string.code_editor_generated_no_target));
+            return;
+        }
+        String targetPath = preview.overrideTarget;
+        String title = preview.name;
+        File target = new File(targetPath);
+        File parent = target.getParentFile();
+        if (parent != null && !parent.exists() && !parent.mkdirs()) {
+            SketchwareUtil.toastError(getString(R.string.file_explorer_error_create_failed));
+            return;
+        }
+        if (!SourceEditorSession.writeContent(targetPath, binding.editor.getText().toString())) {
+            SketchwareUtil.toastError(getString(R.string.file_explorer_error_create_failed));
+            return;
+        }
+        ProjectFileCatalog catalog = ProjectFileCatalog.load(scId);
+        catalog.markCustomized(toFilesRelative(scId, targetPath), "", title);
+        SketchwareUtil.toast(getString(R.string.file_explorer_customized_toast, title));
+
+        // Hand the buffer over to a normal session so further edits save directly.
+        generatedPreview = null;
+        previewDirty = false;
+        binding.editor.setEditable(true);
+        invalidateOptionsMenu();
+        updateEmptyState();
+        int existing = indexOfSession(targetPath);
+        if (existing >= 0) {
+            openSessionAt(existing);
+        } else if (!openFile(targetPath)) {
+            updateTitle();
+        }
     }
 
     //endregion
@@ -729,7 +776,8 @@ public class ProjectCodeEditorActivity extends BaseAppCompatActivity {
         boolean showTabs = !previewing && !sessions.isEmpty();
         binding.tabsRow.setVisibility(showTabs ? View.VISIBLE : View.GONE);
         binding.noFilesLayout.setVisibility(empty ? View.VISIBLE : View.GONE);
-        binding.symbolInput.setVisibility(!previewing && !sessions.isEmpty() ? View.VISIBLE : View.GONE);
+        // The symbol bar belongs to the editable buffer, generated file included.
+        binding.symbolInput.setVisibility(empty ? View.GONE : View.VISIBLE);
         updateCursorPosition();
     }
 
@@ -878,26 +926,32 @@ public class ProjectCodeEditorActivity extends BaseAppCompatActivity {
     @Override
     public boolean onPrepareOptionsMenu(@NonNull Menu menu) {
         boolean previewing = generatedPreview != null;
-        MenuItem customize = menu.findItem(R.id.action_customize_generated);
-        if (customize != null) {
-            customize.setVisible(previewing && generatedPreview.overrideTarget != null);
-        }
-        int[] editingOnly = {
-                R.id.action_save, R.id.action_save_all, R.id.action_find_replace,
-                R.id.action_goto_line, R.id.action_duplicate_line, R.id.action_format,
-                R.id.action_font_size, R.id.action_word_wrap, R.id.action_autocomplete,
-                R.id.action_autocomplete_symbol_pair, R.id.action_select_theme,
-                R.id.action_layout_preview
+        // Actions that need one of the open tabs (find/replace, formatting, layout
+        // preview) stay hidden in a generated-file buffer; everything else - above
+        // all Save - works exactly as it does for a normal project file.
+        int[] tabsOnly = {
+                R.id.action_find_replace, R.id.action_goto_line, R.id.action_duplicate_line,
+                R.id.action_format, R.id.action_font_size, R.id.action_word_wrap,
+                R.id.action_autocomplete, R.id.action_autocomplete_symbol_pair,
+                R.id.action_select_theme, R.id.action_layout_preview
         };
-        for (int id : editingOnly) {
+        for (int id : tabsOnly) {
             MenuItem item = menu.findItem(id);
             if (item != null) {
                 item.setVisible(!previewing);
             }
         }
-        MenuItem preview = menu.findItem(R.id.action_layout_preview);
-        if (preview != null && !previewing) {
-            preview.setVisible(isLayoutFile());
+        MenuItem save = menu.findItem(R.id.action_save);
+        if (save != null) {
+            save.setVisible(previewing || activeSessionIndex >= 0);
+        }
+        MenuItem saveAll = menu.findItem(R.id.action_save_all);
+        if (saveAll != null) {
+            saveAll.setVisible(!previewing && !sessions.isEmpty());
+        }
+        MenuItem layoutPreview = menu.findItem(R.id.action_layout_preview);
+        if (layoutPreview != null && !previewing) {
+            layoutPreview.setVisible(isLayoutFile());
         }
         return super.onPrepareOptionsMenu(menu);
     }
@@ -906,17 +960,16 @@ public class ProjectCodeEditorActivity extends BaseAppCompatActivity {
     @Override
     public boolean onOptionsItemSelected(@NonNull MenuItem item) {
         int itemId = item.getItemId();
-        if (itemId == R.id.action_customize_generated) {
-            customizeCurrentPreview();
-            return true;
-        } else if (itemId == R.id.action_undo) {
+        if (itemId == R.id.action_undo) {
             binding.editor.undo();
             return true;
         } else if (itemId == R.id.action_redo) {
             binding.editor.redo();
             return true;
         } else if (itemId == R.id.action_save) {
-            if (activeSessionIndex >= 0 && !saveSession(activeSessionIndex)) {
+            if (generatedPreview != null) {
+                saveGeneratedPreview();
+            } else if (activeSessionIndex >= 0 && !saveSession(activeSessionIndex)) {
                 SketchwareUtil.toastError("Could not save file");
             }
             return true;

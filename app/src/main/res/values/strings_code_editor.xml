@@ -2,28 +2,22 @@
 <resources>
     <!-- Code Mode: file explorer -->
     <string name="text_title_menu_files">Files</string>
-    <string name="text_subtitle_menu_files">Browse project source files</string>
-    <string name="file_explorer_empty_title">No files here</string>
-    <string name="file_explorer_empty_body">Use the pencil menu above to create files and folders, or open a generated source to customize it.</string>
+    <string name="text_subtitle_menu_files">Project files</string>
+    <string name="file_explorer_subtitle">Project files</string>
+    <string name="file_explorer_hint_folder">Folder</string>
+    <string name="file_explorer_menu_show_hidden">Show hidden files</string>
+    <string name="file_explorer_menu_collapse_all">Collapse all</string>
+    <string name="file_explorer_empty_title">This project has no files yet</string>
+    <string name="file_explorer_empty_body">Create a file or folder with the button below, or import existing sources into the project.</string>
     <string name="file_explorer_open_editor">Open editor</string>
     <string name="file_explorer_menu_new_file">New file</string>
     <string name="file_explorer_menu_new_folder">New folder</string>
     <string name="file_explorer_badge_generated">generated</string>
     <string name="file_explorer_badge_customized">customized</string>
     <string name="file_explorer_row_actions">Row actions</string>
-    <string name="file_explorer_customize_hint">Open the project in block mode once to generate sources.</string>
     <string name="file_explorer_menu_view_all_sources">View all sources</string>
-    <string name="file_explorer_menu_manifest">Android manifest</string>
     <string name="file_explorer_menu_manifest_add_activity">Add as Activity to manifest</string>
     <string name="file_explorer_menu_manifest_remove_activity">Remove from manifest</string>
-    <string name="file_explorer_menu_manifest_add_service">Add as Service to manifest</string>
-    <string name="file_explorer_menu_manifest_remove_service">Remove from services</string>
-    <string name="file_explorer_menu_font_size">Editor font size</string>
-    <string name="file_explorer_section_manifest">Manifest</string>
-    <string name="file_explorer_section_java">Java</string>
-    <string name="file_explorer_section_layouts">Layouts</string>
-    <string name="file_explorer_section_resources">Resources</string>
-    <string name="file_explorer_section_other">Other sources</string>
     <string name="file_explorer_menu_view_manifest">View manifest</string>
     <string name="file_explorer_menu_edit_manifest">Edit manifest</string>
     <string name="file_explorer_menu_view_generated">View generated file</string>
@@ -54,6 +48,7 @@
     <string name="file_explorer_error_create_failed">Could not create</string>
     <string name="file_explorer_error_rename_failed">Rename failed</string>
     <string name="file_explorer_delete_message">Delete %1$s? This cannot be undone.</string>
+    <string name="file_explorer_delete_folder_message">Delete folder %1$s and everything inside it? This cannot be undone.</string>
 
     <!-- Code Mode: editor -->
     <string name="code_editor_no_open_files_title">No file open</string>
@@ -66,7 +61,10 @@
     <string name="code_editor_menu_select_theme">Select theme</string>
     <string name="code_editor_menu_layout_preview">Layout preview</string>
     <string name="code_editor_dirty_subtitle">● unsaved changes</string>
-    <string name="code_editor_generated_subtitle">block-generated (read-only)</string>
+    <string name="code_editor_generated_subtitle">block-generated · saving creates your copy</string>
+    <string name="code_editor_generated_dirty_subtitle">● unsaved — save to create your copy</string>
+    <string name="code_editor_generated_unsaved_message">Save your edits to %1$s? Saving creates your own copy, which block mode then stops regenerating.</string>
+    <string name="code_editor_generated_no_target">This generated file cannot be customized</string>
     <string name="code_editor_cursor_position">Ln %1$d, Col %2$d</string>
     <string name="code_editor_open_file">Open file</string>
     <string name="code_editor_menu_duplicate_line">Duplicate line</string>
@@ -77,6 +75,5 @@
     <string name="common_word_refresh">Refresh</string>
     <string name="common_word_discard">Discard</string>
     <string name="common_word_overwrite">Overwrite</string>
-    <string name="common_word_open">Open</string>
     <string name="common_word_cut">Cut</string>
 </resources>

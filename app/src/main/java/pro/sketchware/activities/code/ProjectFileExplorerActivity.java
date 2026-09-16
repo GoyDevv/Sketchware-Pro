@@ -3,6 +3,7 @@ package pro.sketchware.activities.code;
 import static pro.sketchware.utility.GsonUtils.getGson;
 
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.net.Uri;
 import android.os.Bundle;
 import android.text.InputType;
@@ -10,9 +11,10 @@ import android.view.Menu;
 import android.view.MenuItem;
 import android.view.View;
 import android.view.WindowManager;
+import android.widget.ArrayAdapter;
+import android.widget.AutoCompleteTextView;
 import android.widget.Button;
 
-import androidx.activity.OnBackPressedCallback;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.appcompat.app.AlertDialog;
@@ -31,10 +33,15 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
 
 import a.a.a.hC;
 import a.a.a.jC;
+import a.a.a.lC;
 import mod.hey.studios.util.Helper;
 import pro.sketchware.R;
 import pro.sketchware.databinding.ActivityProjectFileExplorerBinding;
@@ -42,53 +49,55 @@ import pro.sketchware.utility.FilePathUtil;
 import pro.sketchware.utility.FileResConfig;
 import pro.sketchware.utility.FileUtil;
 import pro.sketchware.utility.SketchwareUtil;
+import pro.sketchware.utility.UI;
 
 /**
- * Code Mode entry point: a real, collapsible file tree of the Sketchware Pro
- * project being edited, rooted at ".sketchware/data/&lt;sc_id&gt;/files".
+ * Code Mode entry point: a real, collapsible file tree of the project that is
+ * currently open in Sketchware Pro.
  * <p>
- * The tree shows every folder exactly as it exists on disk, merged with virtual
- * entries for block-generated activities/layouts that have no on-disk copy yet.
- * Files opened here are the exact files the build pipeline consumes:
- * <ul>
- *     <li><b>java</b> - custom Java/Kotlin sources, compiled by kotlinc + ECJ,</li>
- *     <li><b>resource</b> - res overrides compiled by aapt2 (values, drawable, ...),</li>
- *     <li><b>assets</b> - packaged into the APK as-is.</li>
- * </ul>
- * All file operations (create, rename, delete, duplicate, copy/cut/paste,
- * import) are provided through Material dialogs. Generated files can be
- * previewed read-only and customized into the tree via "Customize".
+ * The tree is rooted at the project's source directory
+ * ({@code .sketchware/data/&lt;sc_id&gt;/files}) - the exact directory the build
+ * pipeline reads: {@code java/} is compiled by kotlinc + ECJ, {@code resource/}
+ * is merged by aapt2 and {@code assets/} is packaged as-is. Folders are listed
+ * from the real filesystem on demand (never hardcoded), and block-generated
+ * activities/layouts are merged in as virtual entries at the position where
+ * their customized copy would live, so a project that has never been built still
+ * shows its true structure.
  */
 public class ProjectFileExplorerActivity extends BaseAppCompatActivity
-        implements ProjectFileTreeAdapter.Listener {
+        implements ProjectFileTreeAdapter.Listener, ProjectFileTreeAdapter.ChildrenProvider {
 
     public static final String EXTRA_SC_ID = "sc_id";
 
-    private static final String STATE_EXPANDED = "expanded_paths";
+    private static final String PREFS = "code_mode_explorer";
+    private static final String KEY_EXPANDED = "expanded_";
+    private static final String KEY_HIDDEN = "show_hidden";
 
-    /** Pending clipboard file for copy/cut ("cut" removes the source on paste). */
+    /** Pending clipboard file for copy/cut (cut removes the source on paste). */
     private enum ClipboardOp {COPY, CUT}
 
     private ActivityProjectFileExplorerBinding binding;
     private ProjectFileTreeAdapter adapter;
     private ProjectFileCatalog catalog;
     private FileResConfig frc;
+    private SharedPreferences prefs;
+
     private String scId;
-    private String scDataFilesPath;
+    /** {@code .sketchware/data/<sc_id>/files}: the project's own source tree. */
+    private String filesRoot;
+    private String javaRoot;
+    private String resourceRoot;
+    private String layoutRoot;
+    private String projectName;
+
     private String clipboardPath;
     private ClipboardOp clipboardOp;
-    /** Directory the SAF import places files into; null when import was not started from a row. */
+    private boolean showHiddenFiles;
+    /** Skips the redundant refresh triggered by the very first {@code onResume}. */
+    private boolean firstResume = true;
+    /** Directory the SAF import places files into. */
     @Nullable
     private String importTargetDir;
-
-    private final OnBackPressedCallback backPressedCallback = new OnBackPressedCallback(false) {
-        @Override
-        public void handleOnBackPressed() {
-            // Nothing to unwind any more (no directory navigation); let the system proceed.
-            setEnabled(false);
-            getOnBackPressedDispatcher().onBackPressed();
-        }
-    };
 
     @Override
     public void onCreate(@Nullable Bundle savedInstanceState) {
@@ -104,53 +113,103 @@ public class ProjectFileExplorerActivity extends BaseAppCompatActivity
             return;
         }
 
+        prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+        showHiddenFiles = prefs.getBoolean(KEY_HIDDEN, false);
+
         FilePathUtil fpu = new FilePathUtil();
-        scDataFilesPath = new File(fpu.getPathJava(scId)).getParentFile().getAbsolutePath();
+        filesRoot = new File(fpu.getPathJava(scId)).getParentFile().getAbsolutePath();
+        javaRoot = fpu.getPathJava(scId);
+        resourceRoot = fpu.getPathResource(scId);
+        layoutRoot = new File(resourceRoot, "layout").getAbsolutePath();
+        projectName = resolveProjectName();
+
         catalog = ProjectFileCatalog.load(scId);
+        // Drop records for override files that no longer exist (deleted elsewhere).
+        catalog.pruneMissing();
         frc = new FileResConfig(scId);
 
         setSupportActionBar(binding.toolbar);
+        binding.toolbar.setTitle(projectName);
+        binding.toolbar.setSubtitle(getString(R.string.file_explorer_subtitle));
         binding.toolbar.setNavigationOnClickListener(v -> getOnBackPressedDispatcher().onBackPressed());
-        getOnBackPressedDispatcher().addCallback(this, backPressedCallback);
 
-        adapter = new ProjectFileTreeAdapter(this);
+        // Window insets: the app-bar draws behind the status bar and pads its own
+        // content; the bottom inset keeps rows and the FAB clear of the nav bar.
+        UI.addSystemWindowInsetToPadding(binding.appBarLayout, true, true, true, false);
+        UI.addSystemWindowInsetToPadding(binding.fileList, false, false, false, true);
+        UI.addSystemWindowInsetToPadding(binding.noFilesLayout, false, false, false, true);
+        UI.addSystemWindowInsetToMargin(binding.newFileButton, false, false, false, true);
+
+        adapter = new ProjectFileTreeAdapter(this, this);
+        adapter.setRenderListener(this::updateEmptyState);
         binding.fileList.setLayoutManager(new LinearLayoutManager(this));
         binding.fileList.setAdapter(adapter);
 
-        ensureDirectoryExists(new File(scDataFilesPath, "java"));
-        ensureDirectoryExists(new File(scDataFilesPath, "resource"));
+        // The build expects these to exist; creating them also guarantees a
+        // meaningful tree instead of a permanently empty screen.
+        ensureDirectoryExists(new File(javaRoot));
+        ensureDirectoryExists(new File(resourceRoot));
+        ensureDirectoryExists(new File(layoutRoot));
 
-        if (savedInstanceState != null) {
-            List<String> expanded = savedInstanceState.getStringArrayList(STATE_EXPANDED);
-            if (expanded != null) {
-                for (String path : expanded) {
-                    adapter.setExpanded(path, true);
-                }
-            }
-        }
+        restoreExpandedPaths();
+        adapter.setRoot(ProjectFileTreeAdapter.project(projectName, filesRoot));
 
-        binding.openEditorButton.setOnClickListener(v ->
-                startActivity(new Intent(getApplicationContext(), ProjectCodeEditorActivity.class)
-                        .putExtra(ProjectCodeEditorActivity.EXTRA_SC_ID, scId)));
-
-        refresh();
+        binding.newFileButton.setOnClickListener(v -> promptCreate(true, defaultCreateTarget()));
     }
 
     @Override
     protected void onSaveInstanceState(@NonNull Bundle outState) {
         super.onSaveInstanceState(outState);
-        outState.putStringArrayList(STATE_EXPANDED, new ArrayList<>(adapter.getExpandedPaths()));
+        // Expansion state is also persisted in prefs; this covers rotation.
+        if (adapter != null) {
+            persistExpandedPaths();
+        }
+    }
+
+    @Override
+    public void onPause() {
+        super.onPause();
+        if (adapter != null) {
+            persistExpandedPaths();
+        }
+    }
+
+    @Override
+    public void onDestroy() {
+        super.onDestroy();
+        if (adapter != null) {
+            adapter.shutdown();
+        }
     }
 
     @Override
     public void onResume() {
         super.onResume();
-        // finish() may already be scheduled (missing sc_id): catalog is null then.
-        if (catalog == null || isFinishing()) {
+        // finish() may already be scheduled (missing sc_id): fields are null then.
+        if (adapter == null || isFinishing()) {
             return;
         }
-        // External changes (other managers, builds) are picked up on return.
-        refresh();
+        if (firstResume) {
+            firstResume = false;
+            return;
+        }
+        // Pick up anything another manager (or a build) changed meanwhile.
+        adapter.invalidateAndReload();
+    }
+
+    /**
+     * Shows the explanation only once the project root has actually been listed and
+     * turned out to be empty - for example when storage access was denied and the
+     * source folders could not be created. While the listing is still in flight the
+     * tree stays on screen, so no empty state ever flashes during loading.
+     */
+    private void updateEmptyState() {
+        if (adapter == null) {
+            return;
+        }
+        boolean empty = adapter.isLoaded(filesRoot) && !adapter.hasChildren(filesRoot);
+        binding.noFilesLayout.setVisibility(empty ? View.VISIBLE : View.GONE);
+        binding.fileList.setVisibility(empty ? View.GONE : View.VISIBLE);
     }
 
     private void ensureDirectoryExists(@NonNull File directory) {
@@ -159,187 +218,166 @@ public class ProjectFileExplorerActivity extends BaseAppCompatActivity
         }
     }
 
-    //region Tree building
-
-    private void refresh() {
-        catalog.pruneMissing();
-        List<ProjectFileTreeAdapter.Node> model = new ArrayList<>();
-
-        // Java sources: real folders (with packages) + custom files + generated activities.
-        File javaDir = new File(scDataFilesPath, "java");
-        appendDirectoryTree(model, javaDir, 0, "");
-        appendGeneratedJava(model, javaDir, 0);
-
-        // Resources: real folders + generated layouts merged into resource/layout.
-        File resourceDir = new File(scDataFilesPath, "resource");
-        appendDirectoryTree(model, resourceDir, 0, "");
-        appendGeneratedLayouts(model, new File(resourceDir, "layout"), 1);
-
-        // Assets, broadcast receivers, services.
-        appendDirectoryTree(model, new File(scDataFilesPath, "assets"), 0, "assets");
-        appendDirectoryTree(model, new File(scDataFilesPath, "broadcast"), 0, "broadcast");
-        appendDirectoryTree(model, new File(scDataFilesPath, "service"), 0, "service");
-
-        // Virtual manifest entry (view/edit through the app's manifest editor).
-        model.add(new ProjectFileTreeAdapter.Node(ProjectFileTreeAdapter.TYPE_GENERATED,
-                "AndroidManifest.xml", "", "", null, false, 0, false, -1));
-
-        adapter.submitModel(model);
-        boolean empty = model.isEmpty();
-        binding.noFilesLayout.setVisibility(empty ? View.VISIBLE : View.GONE);
-        binding.fileList.setVisibility(empty ? View.GONE : View.VISIBLE);
-    }
-
-    /**
-     * Appends {@code dir} and (collapsed by default) its whole subtree. When
-     * {@code forcedName} is non-empty the top directory gets that display name
-     * (used to label root categories such as "assets").
-     */
-    private void appendDirectoryTree(@NonNull List<ProjectFileTreeAdapter.Node> out,
-                                     @NonNull File dir, int depth, @Nullable String forcedName) {
-        if (!dir.isDirectory()) {
-            if (forcedName != null && !forcedName.isEmpty()) {
-                // Category root that does not exist yet: still offer creation.
-                out.add(new ProjectFileTreeAdapter.Node(ProjectFileTreeAdapter.TYPE_DIRECTORY,
-                        forcedName, dir.getAbsolutePath(), "", null, false, depth, false, -1));
+    @NonNull
+    private String resolveProjectName() {
+        try {
+            Map<String, Object> metadata = lC.b(scId);
+            if (metadata != null) {
+                Object name = metadata.get("my_ws_name");
+                if (name instanceof String && !((String) name).isEmpty()) {
+                    return (String) name;
+                }
+                Object appName = metadata.get("my_app_name");
+                if (appName instanceof String && !((String) appName).isEmpty()) {
+                    return (String) appName;
+                }
             }
-            return;
+        } catch (Exception ignored) {
+            // Fall through to the project id.
         }
-        String display = forcedName != null && !forcedName.isEmpty() ? forcedName : dir.getName();
-        out.add(new ProjectFileTreeAdapter.Node(ProjectFileTreeAdapter.TYPE_DIRECTORY,
-                display, dir.getAbsolutePath(), "", null, false, depth, false, countRecursive(dir)));
-        appendChildren(out, dir, depth + 1);
+        return scId;
     }
 
-    private void appendChildren(@NonNull List<ProjectFileTreeAdapter.Node> out,
-                                @NonNull File dir, int depth) {
-        File[] children = dir.listFiles();
-        if (children == null) {
-            return;
-        }
+    //region Tree building (called on a background thread)
+
+    @NonNull
+    @Override
+    public List<ProjectFileTreeAdapter.Node> childrenOf(@NonNull String directory) {
+        List<ProjectFileTreeAdapter.Node> result = new ArrayList<>();
+        File dir = new File(directory);
+        File[] entries = dir.listFiles();
+
         List<File> directories = new ArrayList<>();
         List<File> files = new ArrayList<>();
-        for (File child : children) {
-            if (child.isDirectory()) {
-                directories.add(child);
-            } else {
-                files.add(child);
+        if (entries != null) {
+            for (File entry : entries) {
+                if (!showHiddenFiles && entry.getName().startsWith(".")) {
+                    continue;
+                }
+                if (entry.isDirectory()) {
+                    directories.add(entry);
+                } else {
+                    files.add(entry);
+                }
             }
         }
         directories.sort((a, b) -> a.getName().compareToIgnoreCase(b.getName()));
         files.sort((a, b) -> a.getName().compareToIgnoreCase(b.getName()));
-        for (File d : directories) {
-            out.add(new ProjectFileTreeAdapter.Node(ProjectFileTreeAdapter.TYPE_DIRECTORY,
-                    d.getName(), d.getAbsolutePath(), dir.getAbsolutePath(),
-                    null, false, depth, false, countRecursive(d)));
-            appendChildren(out, d, depth + 1);
+
+        for (File child : directories) {
+            File[] inner = child.listFiles();
+            int childCount = inner == null ? 0 : inner.length;
+            result.add(ProjectFileTreeAdapter.directory(child.getName(),
+                    child.getAbsolutePath(), childCount));
         }
-        for (File f : files) {
-            boolean customized = catalog.findByOverride(toScRelative(f.getAbsolutePath())) != null;
-            out.add(new ProjectFileTreeAdapter.Node(ProjectFileTreeAdapter.TYPE_FILE,
-                    f.getName(), f.getAbsolutePath(), dir.getAbsolutePath(),
-                    null, customized, depth, false, -1));
+        for (File child : files) {
+            boolean customized = catalog.findByOverride(toScRelative(child.getAbsolutePath())) != null;
+            result.add(ProjectFileTreeAdapter.file(child.getName(),
+                    child.getAbsolutePath(), customized));
         }
+
+        // Block-generated sources are merged in where their customized copy would
+        // live, so they show up even before they exist on disk.
+        if (javaRoot.equals(directory)) {
+            appendGeneratedActivities(result, javaRoot);
+        } else if (layoutRoot.equals(directory)) {
+            appendGeneratedLayouts(result, layoutRoot);
+        } else if (filesRoot.equals(directory)) {
+            result.add(ProjectFileTreeAdapter.generated("AndroidManifest.xml", "",
+                    ProjectFileTreeAdapter.KIND_MANIFEST));
+        }
+        return result;
     }
 
-    /**
-     * Appends virtual generated-activity nodes that have no override file on disk yet.
-     * Customized copies appear as normal files inside the real java tree instead.
-     */
-    private void appendGeneratedJava(@NonNull List<ProjectFileTreeAdapter.Node> out,
-                                     @NonNull File javaDir, int depth) {
-        List<ProjectFileBean> activities = new ArrayList<>();
-        try {
-            hC projectFileManager = jC.b(scId);
-            if (projectFileManager != null && projectFileManager.b() != null) {
-                activities.addAll(projectFileManager.b());
-            }
-        } catch (Exception ignored) {
-            // Broken metadata: fall back to disk-only tree.
-            return;
-        }
-        for (ProjectFileBean bean : activities) {
+    /** Generated activity sources sit directly in {@code files/java} as overrides. */
+    private void appendGeneratedActivities(@NonNull List<ProjectFileTreeAdapter.Node> out,
+                                            @NonNull String javaDir) {
+        for (ProjectFileBean bean : projectFiles()) {
             String javaName = bean.getJavaName();
-            if (javaName == null || javaName.isEmpty()) {
+            if (javaName == null || javaName.isEmpty() || !javaName.endsWith(".java")) {
                 continue;
             }
-            File override = new File(javaDir, javaName);
-            if (override.isFile()) {
-                continue; // already shown as a real file
+            String path = new File(javaDir, javaName).getAbsolutePath();
+            if (new File(path).exists() || containsPath(out, path)) {
+                continue;
             }
-            out.add(new ProjectFileTreeAdapter.Node(ProjectFileTreeAdapter.TYPE_GENERATED,
-                    javaName, override.getAbsolutePath(), javaDir.getAbsolutePath(),
-                    ProjectFileTreeAdapter.KIND_ACTIVITY, false, depth, false, -1));
+            out.add(ProjectFileTreeAdapter.generated(javaName, path,
+                    ProjectFileTreeAdapter.KIND_ACTIVITY));
         }
     }
 
-    /**
-     * Appends virtual generated-layout nodes under resource/layout (created on demand).
-     */
+    /** Generated layouts sit in {@code files/resource/layout}. */
     private void appendGeneratedLayouts(@NonNull List<ProjectFileTreeAdapter.Node> out,
-                                        @NonNull File layoutDir, int depth) {
-        List<ProjectFileBean> layouts = new ArrayList<>();
-        try {
-            hC projectFileManager = jC.b(scId);
-            if (projectFileManager != null) {
-                if (projectFileManager.b() != null) {
-                    layouts.addAll(projectFileManager.b());
-                }
-                if (projectFileManager.c() != null) {
-                    layouts.addAll(projectFileManager.c());
-                }
-            }
-        } catch (Exception ignored) {
-            return;
-        }
-        if (layouts.isEmpty()) {
-            return;
-        }
-        out.add(new ProjectFileTreeAdapter.Node(ProjectFileTreeAdapter.TYPE_DIRECTORY,
-                layoutDir.getName(), layoutDir.getAbsolutePath(),
-                new File(scDataFilesPath, "resource").getAbsolutePath(),
-                null, false, depth, false, -1));
-        for (ProjectFileBean bean : layouts) {
+                                       @NonNull String layoutDir) {
+        Set<String> seen = new LinkedHashSet<>();
+        for (ProjectFileBean bean : projectFiles()) {
             String xmlName = bean.getXmlName();
             if (xmlName == null || xmlName.isEmpty()) {
                 continue;
             }
-            File override = new File(layoutDir, xmlName);
-            if (override.isFile()) {
+            if (!xmlName.endsWith(".xml")) {
+                xmlName = xmlName + ".xml";
+            }
+            if (!seen.add(xmlName)) {
                 continue;
             }
-            out.add(new ProjectFileTreeAdapter.Node(ProjectFileTreeAdapter.TYPE_GENERATED,
-                    xmlName, override.getAbsolutePath(), layoutDir.getAbsolutePath(),
-                    ProjectFileTreeAdapter.KIND_LAYOUT, false, depth + 1, false, -1));
+            String path = new File(layoutDir, xmlName).getAbsolutePath();
+            if (new File(path).exists() || containsPath(out, path)) {
+                continue;
+            }
+            out.add(ProjectFileTreeAdapter.generated(xmlName, path,
+                    ProjectFileTreeAdapter.KIND_LAYOUT));
         }
     }
 
-    private int countRecursive(@NonNull File dir) {
-        int count = 0;
-        File[] children = dir.listFiles();
-        if (children != null) {
-            for (File child : children) {
-                count += child.isDirectory() ? countRecursive(child) : 1;
+    private static boolean containsPath(@NonNull List<ProjectFileTreeAdapter.Node> nodes,
+                                        @NonNull String path) {
+        for (ProjectFileTreeAdapter.Node node : nodes) {
+            if (node.path.equals(path)) {
+                return true;
             }
         }
-        return count;
+        return false;
     }
 
-    /** Whether {@code path} is the tree root or one of the category roots. */
-    boolean isTreeRoot(@NonNull String path) {
-        return path.equals(scDataFilesPath);
-    }
-
+    /** Activities (and custom views) declared in the project's block metadata. */
     @NonNull
-    private String toScRelative(@NonNull String absolutePath) {
-        if (absolutePath.startsWith(scDataFilesPath)) {
-            String relative = absolutePath.substring(scDataFilesPath.length());
-            if (relative.startsWith("/")) {
-                relative = relative.substring(1);
+    private List<ProjectFileBean> projectFiles() {
+        List<ProjectFileBean> beans = new ArrayList<>();
+        try {
+            hC manager = jC.b(scId);
+            if (manager == null) {
+                return beans;
             }
-            return "files/" + relative;
+            if (manager.b() != null) {
+                beans.addAll(manager.b());
+            }
+            if (manager.c() != null) {
+                beans.addAll(manager.c());
+            }
+        } catch (Exception ignored) {
+            // Broken metadata: the disk-only tree is still correct.
         }
-        return absolutePath;
+        return beans;
+    }
+
+    //endregion
+
+    //region Expansion persistence
+
+    private void restoreExpandedPaths() {
+        Set<String> saved = prefs.getStringSet(KEY_EXPANDED + scId, null);
+        if (saved == null) {
+            return;
+        }
+        for (String path : saved) {
+            adapter.setExpanded(path, true);
+        }
+    }
+
+    private void persistExpandedPaths() {
+        Set<String> expanded = new LinkedHashSet<>(adapter.getExpandedPaths());
+        prefs.edit().putStringSet(KEY_EXPANDED + scId, expanded).apply();
     }
 
     //endregion
@@ -348,34 +386,19 @@ public class ProjectFileExplorerActivity extends BaseAppCompatActivity
 
     @Override
     public void onNodeClicked(@NonNull ProjectFileTreeAdapter.Node node) {
-        if (node.type == ProjectFileTreeAdapter.TYPE_DIRECTORY) {
-            // Expand/collapse folders directly in the adapter.
-            boolean nowExpanded = !adapter.isExpanded(node.path);
-            adapter.setExpanded(node.path, nowExpanded);
-            adapter.submitModel(adapter.currentModel());
+        if (node.isDirectory()) {
+            adapter.toggle(node);
             return;
         }
-        if (node.type == ProjectFileTreeAdapter.TYPE_GENERATED) {
-            if (node.title.equals("AndroidManifest.xml")) {
+        if (ProjectFileTreeAdapter.TYPE_GENERATED == node.type) {
+            if (ProjectFileTreeAdapter.KIND_MANIFEST.equals(node.generatedKind)) {
                 viewManifest();
             } else {
-                // Generated file: read-only preview with a Customize action.
-                String kind = ProjectFileTreeAdapter.KIND_LAYOUT.equals(node.generatedKind)
-                        ? "layout" : "java";
-                Intent intent = new Intent(getApplicationContext(), ProjectCodeEditorActivity.class);
-                intent.putExtra(ProjectCodeEditorActivity.EXTRA_SC_ID, scId);
-                intent.putExtra(ProjectCodeEditorActivity.EXTRA_VIEW_NAME, node.title);
-                intent.putExtra(ProjectCodeEditorActivity.EXTRA_VIEW_KIND, kind);
-                intent.putExtra(ProjectCodeEditorActivity.EXTRA_VIEW_TARGET, node.path);
-                startActivity(intent);
+                openGeneratedPreview(node);
             }
             return;
         }
-        // Regular file: open editable. This is the primary path now.
-        Intent intent = new Intent(getApplicationContext(), ProjectCodeEditorActivity.class);
-        intent.putExtra(ProjectCodeEditorActivity.EXTRA_SC_ID, scId);
-        intent.putExtra(ProjectCodeEditorActivity.EXTRA_OPEN_PATH, node.path);
-        startActivity(intent);
+        openInEditor(node.path);
     }
 
     @Override
@@ -383,85 +406,90 @@ public class ProjectFileExplorerActivity extends BaseAppCompatActivity
         showNodeActionsDialog(node);
     }
 
-    @Override
-    public void onExpansionChanged() {
-        // Expansion is handled inline in onNodeClicked.
-    }
-
     //endregion
 
-    //region Node actions (all Material dialogs)
+    //region Node actions (Material dialogs)
 
     private void showNodeActionsDialog(@NonNull ProjectFileTreeAdapter.Node node) {
         List<String> actions = new ArrayList<>();
         List<Runnable> runners = new ArrayList<>();
-        if (node.path.isEmpty()) {
-            // Virtual entry (e.g. manifest): only the actions that make sense for it.
-            actions.add(getString(R.string.file_explorer_menu_view_manifest));
-            runners.add(this::viewManifest);
-            actions.add(getString(R.string.file_explorer_menu_edit_manifest));
-            runners.add(this::openManifestEditor);
-        } else if (node.type == ProjectFileTreeAdapter.TYPE_DIRECTORY) {
-            actions.add(getString(R.string.file_explorer_menu_new_file));
-            runners.add(() -> promptCreateFile(new File(node.path), true));
-            actions.add(getString(R.string.file_explorer_menu_new_folder));
-            runners.add(() -> promptCreateFile(new File(node.path), false));
-            if (!isTreeRoot(node.path) && new File(node.path).listFiles() != null
-                    && new File(node.path).listFiles().length == 0) {
-                actions.add(getString(R.string.common_word_delete));
-                runners.add(() -> confirmDelete(new File(node.path), true));
-            } else {
-                actions.add(getString(R.string.file_explorer_menu_paste_into));
-                runners.add(() -> pasteInto(new File(node.path)));
+
+        switch (node.type) {
+            case ProjectFileTreeAdapter.TYPE_DIRECTORY -> {
+                actions.add(getString(R.string.file_explorer_menu_new_file));
+                runners.add(() -> promptCreate(true, node.path));
+                actions.add(getString(R.string.file_explorer_menu_new_folder));
+                runners.add(() -> promptCreate(false, node.path));
+                actions.add(getString(R.string.file_explorer_menu_import_here));
+                runners.add(() -> startImport(node.path));
+                if (node.path.equals(filesRoot)) {
+                    actions.add(getString(R.string.file_explorer_menu_view_manifest));
+                    runners.add(this::viewManifest);
+                    actions.add(getString(R.string.file_explorer_menu_edit_manifest));
+                    runners.add(this::openManifestEditor);
+                } else {
+                    actions.add(getString(R.string.file_explorer_menu_paste_into));
+                    runners.add(() -> pasteInto(new File(node.path)));
+                    actions.add(getString(R.string.common_word_rename));
+                    runners.add(() -> promptRename(node));
+                    actions.add(getString(R.string.common_word_delete));
+                    runners.add(() -> confirmDelete(node));
+                }
             }
-        } else {
-            actions.add(getString(R.string.common_word_edit));
-            runners.add(() -> onNodeClicked(node));
-            actions.add(getString(R.string.file_explorer_menu_duplicate));
-            runners.add(() -> promptDuplicate(new File(node.path)));
-            actions.add(getString(R.string.common_word_copy));
-            runners.add(() -> {
-                clipboardPath = node.path;
-                clipboardOp = ClipboardOp.COPY;
-                SketchwareUtil.toast(getString(R.string.file_explorer_copied_toast, node.title));
-            });
-            actions.add(getString(R.string.common_word_cut));
-            runners.add(() -> {
-                clipboardPath = node.path;
-                clipboardOp = ClipboardOp.CUT;
-                SketchwareUtil.toast(getString(R.string.file_explorer_cut_toast, node.title));
-            });
-            actions.add(getString(R.string.file_explorer_menu_import_here));
-            runners.add(() -> startImport(new File(node.path).getParentFile()));
-            if (node.type == ProjectFileTreeAdapter.TYPE_GENERATED) {
-                actions.add(getString(R.string.file_explorer_menu_view_generated));
-                runners.add(() -> onNodeClicked(node));
-                actions.add(getString(R.string.file_explorer_menu_customize));
-                runners.add(() -> customizeGenerated(node));
-            } else {
+            case ProjectFileTreeAdapter.TYPE_GENERATED -> {
+                if (ProjectFileTreeAdapter.KIND_MANIFEST.equals(node.generatedKind)) {
+                    actions.add(getString(R.string.file_explorer_menu_view_manifest));
+                    runners.add(this::viewManifest);
+                    actions.add(getString(R.string.file_explorer_menu_edit_manifest));
+                    runners.add(this::openManifestEditor);
+                } else {
+                    actions.add(getString(R.string.file_explorer_menu_view_generated));
+                    runners.add(() -> openGeneratedPreview(node));
+                    actions.add(getString(R.string.file_explorer_menu_customize));
+                    runners.add(() -> customizeGenerated(node));
+                }
+            }
+            default -> {
+                actions.add(getString(R.string.common_word_edit));
+                runners.add(() -> openInEditor(node.path));
+                actions.add(getString(R.string.file_explorer_menu_duplicate));
+                runners.add(() -> promptDuplicate(node));
+                actions.add(getString(R.string.common_word_copy));
+                runners.add(() -> {
+                    clipboardPath = node.path;
+                    clipboardOp = ClipboardOp.COPY;
+                    SketchwareUtil.toast(getString(R.string.file_explorer_copied_toast, node.name));
+                });
+                actions.add(getString(R.string.common_word_cut));
+                runners.add(() -> {
+                    clipboardPath = node.path;
+                    clipboardOp = ClipboardOp.CUT;
+                    SketchwareUtil.toast(getString(R.string.file_explorer_cut_toast, node.name));
+                });
+                File parent = new File(node.path).getParentFile();
+                actions.add(getString(R.string.file_explorer_menu_import_here));
+                runners.add(() -> startImport(parent == null ? null : parent.getAbsolutePath()));
                 if (isRegisterableSource(node)) {
-                    boolean registered = frc.getJavaManifestList().contains(registeredClassName(node))
-                            || frc.getServiceManifestList().contains(registeredClassName(node));
+                    boolean registered = frc.getJavaManifestList().contains(registeredClassName(node));
                     actions.add(getString(registered
                             ? R.string.file_explorer_menu_manifest_remove_activity
                             : R.string.file_explorer_menu_manifest_add_activity));
                     runners.add(() -> registerInManifest(node, !registered));
                 }
                 if (catalog.findByOverride(toScRelative(node.path)) != null) {
-                    // This user file overrides a block-generated file.
                     actions.add(getString(R.string.file_explorer_menu_reset_generated));
                     runners.add(() -> confirmResetToGenerated(node));
                 }
                 actions.add(getString(R.string.common_word_rename));
                 runners.add(() -> promptRename(node));
                 actions.add(getString(R.string.common_word_delete));
-                runners.add(() -> confirmDelete(new File(node.path), false));
+                runners.add(() -> confirmDelete(node));
             }
         }
         actions.add(getString(R.string.common_word_cancel));
 
         new MaterialAlertDialogBuilder(this)
-                .setTitle(node.title)
+                .setTitle(node.name)
                 .setItems(actions.toArray(new String[0]), (dialog, which) -> {
                     if (which < runners.size()) {
                         runners.get(which).run();
@@ -470,14 +498,39 @@ public class ProjectFileExplorerActivity extends BaseAppCompatActivity
                 .show();
     }
 
-    private void promptCreateFile(@NonNull File targetDir, boolean isFile) {
-        View dialogRoot = getLayoutInflater().inflate(R.layout.dialog_project_file_input, null);
-        TextInputLayout layout = dialogRoot.findViewById(R.id.input_layout);
-        TextInputEditText input = dialogRoot.findViewById(R.id.input);
-        layout.setHint(isFile
+    /**
+     * Creates a file or folder. The dialog lets the user pick the destination
+     * folder, so anything can be created anywhere in the project from one place.
+     */
+    private void promptCreate(boolean isFile, @NonNull String targetDir) {
+        View dialogRoot = getLayoutInflater().inflate(R.layout.dialog_project_file_create, null);
+        TextInputLayout nameLayout = dialogRoot.findViewById(R.id.input_layout);
+        TextInputEditText nameInput = dialogRoot.findViewById(R.id.input);
+        TextInputLayout folderLayout = dialogRoot.findViewById(R.id.folder_layout);
+        AutoCompleteTextView folderInput = dialogRoot.findViewById(R.id.folder_input);
+
+        nameLayout.setHint(isFile
                 ? getString(R.string.file_explorer_hint_file_name)
                 : getString(R.string.file_explorer_hint_folder_name));
-        input.setInputType(InputType.TYPE_CLASS_TEXT);
+        nameInput.setInputType(InputType.TYPE_CLASS_TEXT);
+
+        List<String> folders = collectFolders();
+        List<String> labels = new ArrayList<>();
+        for (String folder : folders) {
+            labels.add(toDisplayPath(folder));
+        }
+        ArrayAdapter<String> folderAdapter = new ArrayAdapter<>(this,
+                android.R.layout.simple_list_item_1, labels);
+        folderInput.setAdapter(folderAdapter);
+        int preselect = folders.indexOf(targetDir);
+        if (preselect < 0) {
+            preselect = 0;
+        }
+        final int[] selected = {preselect};
+        folderInput.setText(labels.get(preselect), false);
+        folderInput.setOnItemClickListener((parent, view, position, id) -> selected[0] = position);
+        folderLayout.setHint(getString(R.string.file_explorer_hint_folder));
+
         AlertDialog dialog = new MaterialAlertDialogBuilder(this)
                 .setTitle(isFile ? R.string.file_explorer_menu_new_file : R.string.file_explorer_menu_new_folder)
                 .setView(dialogRoot)
@@ -487,31 +540,80 @@ public class ProjectFileExplorerActivity extends BaseAppCompatActivity
         dialog.setOnShowListener(dialogInterface -> {
             Button positive = dialog.getButton(AlertDialog.BUTTON_POSITIVE);
             positive.setOnClickListener(v -> {
-                String name = Helper.getText(input);
-                String error = validateName(name, targetDir);
+                String name = Helper.getText(nameInput).trim();
+                File targetDirectory = new File(folders.get(selected[0]));
+                String error = validateName(name, targetDirectory);
                 if (error != null) {
-                    layout.setError(error);
+                    nameLayout.setError(error);
                     return;
                 }
-                File target = new File(targetDir, name);
+                File target = new File(targetDirectory, name);
                 boolean ok = isFile ? createTextFile(target) : target.mkdirs();
-                if (ok) {
-                    dialog.dismiss();
-                    refresh();
-                    if (adapter.getExpandedPaths().contains(targetDir.getAbsolutePath())) {
-                        // keep expanded; refresh() re-applies state
-                    }
-                    if (isFile) {
-                        launchEditor(target.getAbsolutePath());
-                    }
-                } else {
-                    layout.setError(getString(R.string.file_explorer_error_create_failed));
+                if (!ok) {
+                    nameLayout.setError(getString(R.string.file_explorer_error_create_failed));
+                    return;
+                }
+                dialog.dismiss();
+                persistExpandedPaths();
+                adapter.setExpanded(targetDirectory.getAbsolutePath(), true);
+                adapter.invalidate(targetDirectory.getAbsolutePath());
+                if (isFile) {
+                    openInEditor(target.getAbsolutePath());
                 }
             });
             dialog.getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE);
-            input.requestFocus();
+            nameInput.requestFocus();
         });
         dialog.show();
+    }
+
+    /** All directories below the project root, shallowest first. */
+    @NonNull
+    private List<String> collectFolders() {
+        List<String> folders = new ArrayList<>();
+        collectFolders(new File(filesRoot), folders);
+        if (folders.isEmpty()) {
+            folders.add(filesRoot);
+        }
+        return folders;
+    }
+
+    private void collectFolders(@NonNull File dir, @NonNull List<String> out) {
+        File[] entries = dir.listFiles();
+        if (entries == null) {
+            return;
+        }
+        List<File> directories = new ArrayList<>();
+        for (File entry : entries) {
+            if (entry.isDirectory() && (showHiddenFiles || !entry.getName().startsWith("."))) {
+                directories.add(entry);
+            }
+        }
+        directories.sort((a, b) -> a.getName().compareToIgnoreCase(b.getName()));
+        for (File child : directories) {
+            out.add(child.getAbsolutePath());
+        }
+        for (File child : directories) {
+            collectFolders(child, out);
+        }
+    }
+
+    /** {@code files/java} - the source root - is where new classes belong. */
+    @NonNull
+    private String defaultCreateTarget() {
+        File javaDir = new File(javaRoot);
+        return javaDir.isDirectory() ? javaRoot : filesRoot;
+    }
+
+    @NonNull
+    private String toDisplayPath(@NonNull String absolute) {
+        if (absolute.equals(filesRoot)) {
+            return projectName;
+        }
+        if (absolute.startsWith(filesRoot + File.separator)) {
+            return absolute.substring(filesRoot.length() + 1);
+        }
+        return absolute;
     }
 
     private void promptRename(@NonNull ProjectFileTreeAdapter.Node node) {
@@ -520,7 +622,11 @@ public class ProjectFileExplorerActivity extends BaseAppCompatActivity
         TextInputEditText input = dialogRoot.findViewById(R.id.input);
         layout.setHint(getString(R.string.file_explorer_hint_new_name));
         input.setInputType(InputType.TYPE_CLASS_TEXT);
-        input.setText(node.title);
+        input.setText(node.name);
+        File parentFile = new File(node.path).getParentFile();
+        if (parentFile == null) {
+            return;
+        }
         AlertDialog dialog = new MaterialAlertDialogBuilder(this)
                 .setTitle(R.string.common_word_rename)
                 .setView(dialogRoot)
@@ -530,29 +636,34 @@ public class ProjectFileExplorerActivity extends BaseAppCompatActivity
         dialog.setOnShowListener(dialogInterface -> {
             Button positive = dialog.getButton(AlertDialog.BUTTON_POSITIVE);
             positive.setOnClickListener(v -> {
-                String name = Helper.getText(input);
-                if (name.equals(node.title)) {
+                String name = Helper.getText(input).trim();
+                if (name.equals(node.name)) {
                     dialog.dismiss();
                     return;
                 }
-                String error = validateName(name, new File(node.parentPath));
+                String error = validateName(name, parentFile);
                 if (error != null) {
                     layout.setError(error);
                     return;
                 }
-                File destination = new File(node.parentPath, name);
-                if (FileUtil.renameFile(node.path, destination.getAbsolutePath())) {
-                    // Rename customization records too (override file moved).
-                    ProjectFileCatalog.Entry entry = catalog.findByOverride(toScRelative(node.path));
-                    if (entry != null) {
-                        catalog.removeByOverride(entry.overridePath);
-                        catalog.markCustomized(toScRelative(destination.getAbsolutePath()), "", name);
-                    }
-                    dialog.dismiss();
-                    refresh();
-                } else {
+                File destination = new File(parentFile, name);
+                if (!FileUtil.renameFile(node.path, destination.getAbsolutePath())) {
                     layout.setError(getString(R.string.file_explorer_error_rename_failed));
+                    return;
                 }
+                if (node.isDirectory()) {
+                    // The old path must not keep expansion or listing cache alive.
+                    adapter.forgetSubtree(node.path);
+                }
+                // Keep customization records pointing at the moved file.
+                ProjectFileCatalog.Entry entry = catalog.findByOverride(toScRelative(node.path));
+                if (entry != null) {
+                    catalog.removeByOverride(entry.overridePath);
+                    catalog.markCustomized(toScRelative(destination.getAbsolutePath()), "", name);
+                }
+                dialog.dismiss();
+                adapter.setExpanded(parentFile.getAbsolutePath(), true);
+                adapter.invalidateAndReload();
             });
             dialog.getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE);
             input.requestFocus();
@@ -560,7 +671,12 @@ public class ProjectFileExplorerActivity extends BaseAppCompatActivity
         dialog.show();
     }
 
-    private void promptDuplicate(@NonNull File source) {
+    private void promptDuplicate(@NonNull ProjectFileTreeAdapter.Node node) {
+        File source = new File(node.path);
+        File parentFile = source.getParentFile();
+        if (parentFile == null) {
+            return;
+        }
         View dialogRoot = getLayoutInflater().inflate(R.layout.dialog_project_file_input, null);
         TextInputLayout layout = dialogRoot.findViewById(R.id.input_layout);
         TextInputEditText input = dialogRoot.findViewById(R.id.input);
@@ -576,20 +692,20 @@ public class ProjectFileExplorerActivity extends BaseAppCompatActivity
         dialog.setOnShowListener(dialogInterface -> {
             Button positive = dialog.getButton(AlertDialog.BUTTON_POSITIVE);
             positive.setOnClickListener(v -> {
-                String name = Helper.getText(input);
-                String error = validateName(name, source.getParentFile());
+                String name = Helper.getText(input).trim();
+                String error = validateName(name, parentFile);
                 if (error != null) {
                     layout.setError(error);
                     return;
                 }
-                File target = new File(source.getParentFile(), name);
-                if (copyRecursively(source, target)) {
-                    dialog.dismiss();
-                    refresh();
-                    SketchwareUtil.toast(getString(R.string.file_explorer_duplicated_toast, name));
-                } else {
+                File target = new File(parentFile, name);
+                if (!copyRecursively(source, target)) {
                     layout.setError(getString(R.string.file_explorer_error_create_failed));
+                    return;
                 }
+                dialog.dismiss();
+                adapter.invalidateAndReload();
+                SketchwareUtil.toast(getString(R.string.file_explorer_duplicated_toast, name));
             });
             dialog.getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE);
             input.requestFocus();
@@ -597,16 +713,28 @@ public class ProjectFileExplorerActivity extends BaseAppCompatActivity
         dialog.show();
     }
 
-    private void confirmDelete(@NonNull File target, boolean isDirectory) {
+    private void confirmDelete(@NonNull ProjectFileTreeAdapter.Node node) {
+        File target = new File(node.path);
+        File parentFile = target.getParentFile();
+        int message = node.isDirectory()
+                ? R.string.file_explorer_delete_folder_message
+                : R.string.file_explorer_delete_message;
         new MaterialAlertDialogBuilder(this)
-                .setTitle(getString(R.string.common_word_delete))
-                .setMessage(getString(R.string.file_explorer_delete_message,
-                        target.getName() + (isDirectory ? "/" : "")))
+                .setTitle(R.string.common_word_delete)
+                .setMessage(getString(message, node.name))
                 .setPositiveButton(R.string.common_word_delete, (dialog, which) -> {
                     FileUtil.deleteFile(target.getAbsolutePath());
                     catalog.removeByOverride(toScRelative(target.getAbsolutePath()));
+                    if (node.isDirectory()) {
+                        // Nothing under the deleted folder may stay expanded or cached.
+                        adapter.forgetSubtree(node.path);
+                    }
                     SketchwareUtil.toast(Helper.getResString(R.string.common_word_deleted_successfully));
-                    refresh();
+                    if (parentFile != null) {
+                        adapter.invalidate(parentFile.getAbsolutePath());
+                    } else {
+                        adapter.invalidateAndReload();
+                    }
                 })
                 .setNegativeButton(R.string.common_word_cancel, null)
                 .show();
@@ -628,24 +756,24 @@ public class ProjectFileExplorerActivity extends BaseAppCompatActivity
             return;
         }
         File target = new File(targetDir, uniqueChildName(targetDir, source.getName()));
-        if (copyRecursively(source, target)) {
-            if (clipboardOp == ClipboardOp.CUT) {
-                FileUtil.deleteFile(source.getAbsolutePath());
-                clipboardPath = null;
-            }
-            refresh();
-        } else {
+        if (!copyRecursively(source, target)) {
             SketchwareUtil.toastError(getString(R.string.file_explorer_error_create_failed));
+            return;
         }
+        if (clipboardOp == ClipboardOp.CUT) {
+            FileUtil.deleteFile(source.getAbsolutePath());
+            clipboardPath = null;
+        }
+        adapter.setExpanded(targetDir.getAbsolutePath(), true);
+        adapter.invalidate(targetDir.getAbsolutePath());
     }
 
     //endregion
 
     //region Import (system file picker)
 
-    private void startImport(@Nullable File targetDir) {
-        importTargetDir = targetDir != null ? targetDir.getAbsolutePath()
-                : new File(scDataFilesPath, "java").getAbsolutePath();
+    private void startImport(@Nullable String targetDir) {
+        importTargetDir = targetDir != null ? targetDir : defaultCreateTarget();
         Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
         intent.addCategory(Intent.CATEGORY_OPENABLE);
         intent.setType("*/*");
@@ -660,14 +788,20 @@ public class ProjectFileExplorerActivity extends BaseAppCompatActivity
     @Override
     protected void onActivityResult(int requestCode, int resultCode, @Nullable Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if (binding == null) {
+            return;
+        }
         if (requestCode == 4201 && resultCode == RESULT_OK && data != null && data.getData() != null) {
             importUri(data.getData());
         }
     }
 
     private void importUri(@NonNull Uri uri) {
-        File targetDir = new File(importTargetDir != null
-                ? importTargetDir : new File(scDataFilesPath, "java").getAbsolutePath());
+        File targetDir = new File(importTargetDir != null ? importTargetDir : defaultCreateTarget());
+        if (!targetDir.isDirectory() && !targetDir.mkdirs()) {
+            SketchwareUtil.toastError(getString(R.string.file_explorer_error_create_failed));
+            return;
+        }
         String name = queryDisplayName(uri);
         if (name == null || name.isEmpty()) {
             name = "imported_" + System.currentTimeMillis() + ".txt";
@@ -688,7 +822,8 @@ public class ProjectFileExplorerActivity extends BaseAppCompatActivity
             SketchwareUtil.toastError("Import failed: " + e.getMessage());
             return;
         }
-        refresh();
+        adapter.setExpanded(targetDir.getAbsolutePath(), true);
+        adapter.invalidate(targetDir.getAbsolutePath());
         SketchwareUtil.toast(getString(R.string.file_explorer_imported_toast, name));
     }
 
@@ -702,30 +837,23 @@ public class ProjectFileExplorerActivity extends BaseAppCompatActivity
                 }
             }
         } catch (Exception ignored) {
+            // Fall back to the URI's last segment below.
         }
         return uri.getLastPathSegment();
     }
 
     //endregion
 
-    //region Generated-file customization (Code Mode ↔ Block Mode bridge)
+    //region Generated files (Code Mode <-> Block Mode bridge)
 
-    private void confirmResetToGenerated(@NonNull ProjectFileTreeAdapter.Node node) {
-        ProjectFileCatalog.Entry entry = catalog.findByOverride(toScRelative(node.path));
-        if (entry == null) {
-            return;
-        }
-        new MaterialAlertDialogBuilder(this)
-                .setTitle(R.string.file_explorer_menu_reset_generated)
-                .setMessage(getString(R.string.file_explorer_reset_message, entry.title))
-                .setPositiveButton(R.string.common_word_delete, (dialog, which) -> {
-                    FileUtil.deleteFile(node.path);
-                    catalog.removeByOverride(entry.overridePath);
-                    SketchwareUtil.toast(getString(R.string.file_explorer_reset_toast));
-                    refresh();
-                })
-                .setNegativeButton(R.string.common_word_cancel, null)
-                .show();
+    private void openGeneratedPreview(@NonNull ProjectFileTreeAdapter.Node node) {
+        String kind = ProjectFileTreeAdapter.KIND_LAYOUT.equals(node.generatedKind) ? "layout" : "java";
+        Intent intent = new Intent(getApplicationContext(), ProjectCodeEditorActivity.class);
+        intent.putExtra(ProjectCodeEditorActivity.EXTRA_SC_ID, scId);
+        intent.putExtra(ProjectCodeEditorActivity.EXTRA_VIEW_NAME, node.name);
+        intent.putExtra(ProjectCodeEditorActivity.EXTRA_VIEW_KIND, kind);
+        intent.putExtra(ProjectCodeEditorActivity.EXTRA_VIEW_TARGET, node.path);
+        startActivity(intent);
     }
 
     private void customizeGenerated(@NonNull ProjectFileTreeAdapter.Node node) {
@@ -735,17 +863,17 @@ public class ProjectFileExplorerActivity extends BaseAppCompatActivity
         File target = new File(node.path);
         new MaterialAlertDialogBuilder(this)
                 .setTitle(R.string.file_explorer_menu_customize)
-                .setMessage(getString(R.string.file_explorer_customize_message, node.title))
+                .setMessage(getString(R.string.file_explorer_customize_message, node.name))
                 .setPositiveButton(R.string.file_explorer_menu_customize, (dialog, which) -> {
-                    k(); // show loading dialog (base class)
+                    k(); // loading dialog from the base class
                     new Thread(() -> {
                         File parent = target.getParentFile();
                         boolean ok = parent != null && (parent.exists() || parent.mkdirs());
-                        String content = "";
                         if (ok) {
+                            String content;
                             try {
                                 content = new a.a.a.yq(getApplicationContext(), scId).getFileSrc(
-                                        node.title, jC.b(scId), jC.a(scId), jC.c(scId));
+                                        node.name, jC.b(scId), jC.a(scId), jC.c(scId));
                             } catch (Exception e) {
                                 content = "";
                             }
@@ -755,15 +883,17 @@ public class ProjectFileExplorerActivity extends BaseAppCompatActivity
                         boolean success = ok;
                         runOnUiThread(() -> {
                             h(); // hide loading dialog
-                            if (isFinishing() || isDestroyed()) {
+                            if (isFinishing() || isDestroyed() || binding == null) {
                                 return;
                             }
                             if (success) {
-                                catalog.markCustomized(toScRelative(target.getAbsolutePath()), "", node.title);
-                                refresh();
-                                launchEditor(target.getAbsolutePath());
+                                catalog.markCustomized(toScRelative(target.getAbsolutePath()),
+                                        "", node.name);
+                                adapter.invalidate(target.getParentFile().getAbsolutePath());
+                                SketchwareUtil.toast(getString(R.string.file_explorer_customized_toast, node.name));
+                                openInEditor(target.getAbsolutePath());
                             } else {
-                                SketchwareUtil.toastError("Could not customize " + node.title);
+                                SketchwareUtil.toastError(getString(R.string.file_explorer_error_create_failed));
                             }
                         });
                     }, "CustomizeGenerated").start();
@@ -772,23 +902,43 @@ public class ProjectFileExplorerActivity extends BaseAppCompatActivity
                 .show();
     }
 
+    private void confirmResetToGenerated(@NonNull ProjectFileTreeAdapter.Node node) {
+        ProjectFileCatalog.Entry entry = catalog.findByOverride(toScRelative(node.path));
+        if (entry == null) {
+            return;
+        }
+        File parentFile = new File(node.path).getParentFile();
+        new MaterialAlertDialogBuilder(this)
+                .setTitle(R.string.file_explorer_menu_reset_generated)
+                .setMessage(getString(R.string.file_explorer_reset_message, entry.title))
+                .setPositiveButton(R.string.common_word_delete, (dialog, which) -> {
+                    FileUtil.deleteFile(node.path);
+                    catalog.removeByOverride(entry.overridePath);
+                    SketchwareUtil.toast(getString(R.string.file_explorer_reset_toast));
+                    if (parentFile != null) {
+                        adapter.invalidate(parentFile.getAbsolutePath());
+                    } else {
+                        adapter.invalidateAndReload();
+                    }
+                })
+                .setNegativeButton(R.string.common_word_cancel, null)
+                .show();
+    }
+
     private void viewManifest() {
-        Intent intent = new Intent(getApplicationContext(), com.besome.sketch.common.SrcViewerActivity.class);
+        Intent intent = new Intent(getApplicationContext(),
+                com.besome.sketch.common.SrcViewerActivity.class);
         intent.putExtra("sc_id", scId);
         intent.putExtra("current", "AndroidManifest.xml");
         startActivity(intent);
     }
 
-    /** Opens the app's existing manifest editor on the first project activity. */
+    /** Opens the app's existing manifest editor on the project's first activity. */
     private void openManifestEditor() {
         String firstActivity = "MainActivity";
-        try {
-            hC projectFileManager = jC.b(scId);
-            List<ProjectFileBean> beans = projectFileManager == null ? null : projectFileManager.b();
-            if (beans != null && !beans.isEmpty() && beans.get(0).getJavaName() != null) {
-                firstActivity = beans.get(0).getJavaName();
-            }
-        } catch (Exception ignored) {
+        List<ProjectFileBean> beans = projectFiles();
+        if (!beans.isEmpty() && beans.get(0).getJavaName() != null) {
+            firstActivity = beans.get(0).getJavaName();
         }
         Intent intent = new Intent(getApplicationContext(),
                 mod.hilal.saif.activities.android_manifest.AndroidManifestInjection.class);
@@ -800,6 +950,24 @@ public class ProjectFileExplorerActivity extends BaseAppCompatActivity
     //endregion
 
     //region Helpers
+
+    @NonNull
+    private String toScRelative(@NonNull String absolutePath) {
+        if (absolutePath.startsWith(filesRoot)) {
+            String relative = absolutePath.substring(filesRoot.length());
+            if (relative.startsWith(File.separator)) {
+                relative = relative.substring(1);
+            }
+            return "files/" + relative;
+        }
+        return absolutePath;
+    }
+
+    private void openInEditor(@NonNull String path) {
+        startActivity(new Intent(getApplicationContext(), ProjectCodeEditorActivity.class)
+                .putExtra(ProjectCodeEditorActivity.EXTRA_SC_ID, scId)
+                .putExtra(ProjectCodeEditorActivity.EXTRA_OPEN_PATH, path));
+    }
 
     @Nullable
     private String validateName(@Nullable String name, @NonNull File targetDir) {
@@ -884,14 +1052,14 @@ public class ProjectFileExplorerActivity extends BaseAppCompatActivity
     }
 
     private boolean createTextFile(@NonNull File target) {
-        String name = target.getName().toLowerCase();
+        String name = target.getName().toLowerCase(Locale.ROOT);
         String template;
         if (name.endsWith(".java")) {
             String simpleName = name.substring(0, name.length() - 5);
-            template = "public class " + simpleName + " {\n\n}\n";
+            template = "package " + resolveJavaPackage(target) + ";\n\npublic class " + simpleName + " {\n\n}\n";
         } else if (name.endsWith(".kt")) {
             String simpleName = name.substring(0, name.length() - 3);
-            template = "class " + simpleName + " {\n\n}\n";
+            template = "package " + resolveJavaPackage(target) + "\n\nclass " + simpleName + " {\n\n}\n";
         } else if (name.endsWith(".xml")) {
             template = "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n";
         } else {
@@ -901,11 +1069,43 @@ public class ProjectFileExplorerActivity extends BaseAppCompatActivity
         return target.isFile();
     }
 
-    private void launchEditor(@NonNull String path) {
-        Intent intent = new Intent(getApplicationContext(), ProjectCodeEditorActivity.class);
-        intent.putExtra(ProjectCodeEditorActivity.EXTRA_SC_ID, scId);
-        intent.putExtra(ProjectCodeEditorActivity.EXTRA_OPEN_PATH, path);
-        startActivity(intent);
+    /** Package a new source file belongs to, derived from its folder below {@code files/java}. */
+    @NonNull
+    private String resolveJavaPackage(@NonNull File target) {
+        File parent = target.getParentFile();
+        String base = resolveAppPackageName();
+        if (parent == null) {
+            return base;
+        }
+        String parentPath = parent.getAbsolutePath();
+        if (!parentPath.startsWith(javaRoot)) {
+            return base;
+        }
+        String relative = parentPath.substring(javaRoot.length());
+        if (relative.startsWith(File.separator)) {
+            relative = relative.substring(1);
+        }
+        if (relative.isEmpty()) {
+            return base;
+        }
+        return relative.replace(File.separatorChar, '.');
+    }
+
+    /** The project's own package name, used for newly created classes. */
+    @NonNull
+    private String resolveAppPackageName() {
+        try {
+            Map<String, Object> metadata = lC.b(scId);
+            if (metadata != null) {
+                Object packageName = metadata.get("my_sc_pkg_name");
+                if (packageName instanceof String && !((String) packageName).isEmpty()) {
+                    return (String) packageName;
+                }
+            }
+        } catch (Exception ignored) {
+            // Fall through to a generic package.
+        }
+        return "com.my.newproject";
     }
 
     //endregion
@@ -913,29 +1113,23 @@ public class ProjectFileExplorerActivity extends BaseAppCompatActivity
     //region Manifest registration (custom activities/services)
 
     private boolean isRegisterableSource(@NonNull ProjectFileTreeAdapter.Node node) {
-        return node.type == ProjectFileTreeAdapter.TYPE_FILE
-                && node.path.startsWith(new File(scDataFilesPath, "java").getAbsolutePath())
-                && (node.title.endsWith(".java") || node.title.endsWith(".kt"));
+        return ProjectFileTreeAdapter.TYPE_FILE == node.type
+                && node.path.startsWith(javaRoot + File.separator)
+                && (node.name.endsWith(".java") || node.name.endsWith(".kt"));
     }
 
     @NonNull
     private String registeredClassName(@NonNull ProjectFileTreeAdapter.Node node) {
-        String javaRoot = new File(scDataFilesPath, "java").getAbsolutePath();
-        String pkgRoot = readPackageName(node.path);
-        if (pkgRoot != null) {
-            return pkgRoot + "." + FileUtil.getFileNameNoExtension(node.path);
+        String declared = readPackageName(node.path);
+        if (declared != null && !declared.isEmpty()) {
+            return declared + "." + FileUtil.getFileNameNoExtension(node.path);
         }
-        String relative = node.path.startsWith(javaRoot)
-                ? node.path.substring(javaRoot.length()) : "";
-        if (relative.startsWith("/")) {
-            relative = relative.substring(1);
-        }
-        int slash = relative.lastIndexOf('/');
-        String folderPackage = slash > 0 ? relative.substring(0, slash).replace('/', '.') : "";
-        String packageName = getIntent().getStringExtra("pkgName");
-        String base = packageName != null && !packageName.isEmpty() ? packageName : "";
-        String full = folderPackage.isEmpty() ? base : base.isEmpty() ? folderPackage : base + "." + folderPackage;
-        return (full.isEmpty() ? "" : full + ".") + FileUtil.getFileNameNoExtension(node.path);
+        String relative = node.path.startsWith(javaRoot + File.separator)
+                ? node.path.substring(javaRoot.length() + 1) : node.name;
+        String packagePath = relative.replace(File.separatorChar, '.');
+        int dot = packagePath.lastIndexOf('.');
+        String packageName = dot > 0 ? packagePath.substring(0, dot) : resolveAppPackageName();
+        return packageName + "." + FileUtil.getFileNameNoExtension(node.name);
     }
 
     @Nullable
@@ -946,7 +1140,8 @@ public class ProjectFileExplorerActivity extends BaseAppCompatActivity
                 return null;
             }
             java.util.regex.Matcher matcher = java.util.regex.Pattern
-                    .compile("package\\s+([\\w.]+)\\s*;").matcher(content);
+                    .compile("^\\s*package\\s+([\\w.]+)\\s*;?", java.util.regex.Pattern.MULTILINE)
+                    .matcher(content);
             return matcher.find() ? matcher.group(1) : null;
         } catch (Exception e) {
             return null;
@@ -955,23 +1150,30 @@ public class ProjectFileExplorerActivity extends BaseAppCompatActivity
 
     private void registerInManifest(@NonNull ProjectFileTreeAdapter.Node node, boolean add) {
         String className = registeredClassName(node);
-        boolean asService = false; // Activity registration only; services live in the components manager.
         List<String> activities = frc.getJavaManifestList();
-        if (add && !activities.contains(className)) {
-            activities.add(className);
-        } else if (!add) {
+        if (add) {
+            if (!activities.contains(className)) {
+                activities.add(className);
+            }
+        } else {
             activities.remove(className);
         }
         FileUtil.writeFile(new FilePathUtil().getManifestJava(scId), getGson().toJson(activities));
         SketchwareUtil.toast((add ? "Added " : "Removed ")
-                + FileUtil.getFileNameNoExtension(node.title) + (asService ? "" : " to manifest"));
+                + FileUtil.getFileNameNoExtension(node.name) + " to manifest");
     }
 
     //endregion
 
+    //region Menu
+
     @Override
     public boolean onCreateOptionsMenu(@NonNull Menu menu) {
         getMenuInflater().inflate(R.menu.project_file_explorer_menu, menu);
+        MenuItem hidden = menu.findItem(R.id.action_show_hidden);
+        if (hidden != null) {
+            hidden.setChecked(showHiddenFiles);
+        }
         return true;
     }
 
@@ -979,13 +1181,15 @@ public class ProjectFileExplorerActivity extends BaseAppCompatActivity
     public boolean onOptionsItemSelected(@NonNull MenuItem item) {
         int itemId = item.getItemId();
         if (itemId == R.id.action_refresh) {
-            refresh();
+            if (adapter != null) {
+                adapter.invalidateAndReload();
+            }
             return true;
         } else if (itemId == R.id.action_new_file) {
-            promptCreateFile(new File(scDataFilesPath, "java"), true);
+            promptCreate(true, defaultCreateTarget());
             return true;
         } else if (itemId == R.id.action_new_folder) {
-            promptCreateFolderInRoot();
+            promptCreate(false, filesRoot);
             return true;
         } else if (itemId == R.id.action_import) {
             startImport(null);
@@ -995,23 +1199,27 @@ public class ProjectFileExplorerActivity extends BaseAppCompatActivity
                     .putExtra(ProjectCodeEditorActivity.EXTRA_SC_ID, scId));
             return true;
         } else if (itemId == R.id.action_view_all_sources) {
-            Intent intent = new Intent(getApplicationContext(), com.besome.sketch.common.SrcViewerActivity.class);
+            Intent intent = new Intent(getApplicationContext(),
+                    com.besome.sketch.common.SrcViewerActivity.class);
             intent.putExtra("sc_id", scId);
             startActivity(intent);
+            return true;
+        } else if (itemId == R.id.action_show_hidden) {
+            showHiddenFiles = !showHiddenFiles;
+            item.setChecked(showHiddenFiles);
+            prefs.edit().putBoolean(KEY_HIDDEN, showHiddenFiles).apply();
+            adapter.invalidateAndReload();
+            return true;
+        } else if (itemId == R.id.action_collapse_all) {
+            Set<String> expanded = new LinkedHashSet<>(adapter.getExpandedPaths());
+            for (String path : expanded) {
+                adapter.setExpanded(path, false);
+            }
+            adapter.invalidateAndReload();
             return true;
         }
         return super.onOptionsItemSelected(item);
     }
 
-    private void promptCreateFolderInRoot() {
-        // Offer creation inside the first-level category roots.
-        String[] roots = {"java", "resource", "assets"};
-        String[] labels = {"java", "resource", "assets"};
-        new MaterialAlertDialogBuilder(this)
-                .setTitle(R.string.file_explorer_menu_new_folder)
-                .setItems(labels, (dialog, which) ->
-                        promptCreateFile(new File(scDataFilesPath, roots[which]), false))
-                .setNegativeButton(R.string.common_word_cancel, null)
-                .show();
-    }
+    //endregion
 }

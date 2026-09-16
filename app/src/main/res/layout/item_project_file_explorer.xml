@@ -1,40 +1,55 @@
+<?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     xmlns:tools="http://schemas.android.com/tools"
     android:layout_width="match_parent"
-    android:layout_height="wrap_content"
-    android:background="?attr/colorSurface"
-    android:foreground="?attr/selectableItemBackground"
+    android:layout_height="?attr/minTouchTargetSize"
+    android:background="?attr/selectableItemBackground"
     android:gravity="center_vertical"
-    android:minHeight="?attr/minTouchTargetSize"
     android:orientation="horizontal"
-    android:paddingBottom="10dp"
-    android:paddingTop="10dp">
+    android:paddingEnd="2dp"
+    tools:ignore="ContentDescription">
 
+    <!-- Depth indentation: width is set per row so the real hierarchy is visible. -->
     <View
         android:id="@+id/indent"
-        android:layout_width="wrap_content"
+        android:layout_width="0dp"
         android:layout_height="1dp" />
 
-    <ImageView
-        android:id="@+id/chevron"
-        android:layout_width="24dp"
-        android:layout_height="24dp"
-        android:layout_marginStart="8dp"
-        android:contentDescription="@null"
-        android:scaleType="fitCenter"
-        android:src="@drawable/ic_mtrl_chevron_right_24"
-        app:tint="?attr/colorOnSurfaceVariant" />
+    <FrameLayout
+        android:layout_width="28dp"
+        android:layout_height="28dp"
+        android:layout_marginStart="8dp">
+
+        <ImageView
+            android:id="@+id/chevron"
+            android:layout_width="18dp"
+            android:layout_height="18dp"
+            android:layout_gravity="center"
+            android:alpha="0.7"
+            android:scaleType="fitCenter"
+            android:src="@drawable/ic_mtrl_chevron_right_24"
+            app:tint="?attr/colorOnSurfaceVariant" />
+
+        <ProgressBar
+            android:id="@+id/progress"
+            style="?android:attr/progressBarStyleSmall"
+            android:layout_width="14dp"
+            android:layout_height="14dp"
+            android:layout_gravity="center"
+            android:indeterminateTint="?attr/colorPrimary"
+            android:visibility="gone"
+            tools:visibility="gone" />
+    </FrameLayout>
 
     <ImageView
         android:id="@+id/icon"
-        android:layout_width="22dp"
-        android:layout_height="22dp"
-        android:layout_marginStart="4dp"
-        android:contentDescription="@null"
+        android:layout_width="20dp"
+        android:layout_height="20dp"
+        android:layout_marginStart="6dp"
         android:scaleType="fitCenter"
         android:src="@drawable/ic_mtrl_file"
-        app:tint="?attr/colorControlNormal" />
+        app:tint="?attr/colorOnSurfaceVariant" />
 
     <TextView
         android:id="@+id/title"
@@ -42,8 +57,9 @@
         android:layout_height="wrap_content"
         android:layout_marginStart="12dp"
         android:layout_weight="1"
+        android:ellipsize="middle"
         android:singleLine="true"
-        android:textAppearance="?attr/textAppearanceBodyLarge"
+        android:textAppearance="?attr/textAppearanceBodyMedium"
         android:textColor="?attr/colorOnSurface"
         tools:text="MainActivity.java" />
 
@@ -51,7 +67,7 @@
         android:id="@+id/badge"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_marginEnd="4dp"
+        android:layout_marginStart="8dp"
         android:background="@drawable/bg_outline_chip"
         android:paddingHorizontal="8dp"
         android:paddingVertical="2dp"
@@ -62,13 +78,14 @@
         tools:text="generated"
         tools:visibility="visible" />
 
-    <ImageView
+    <ImageButton
         android:id="@+id/more"
-        android:layout_width="38dp"
-        android:layout_height="38dp"
+        android:layout_width="40dp"
+        android:layout_height="40dp"
+        android:background="?attr/selectableItemBackgroundBorderless"
         android:contentDescription="@string/file_explorer_row_actions"
-        android:padding="8dp"
+        android:padding="10dp"
         android:scaleType="fitCenter"
         android:src="@drawable/ic_mtrl_more_vertical"
-        app:tint="?attr/colorControlNormal" />
+        app:tint="?attr/colorOnSurfaceVariant" />
 </LinearLayout>

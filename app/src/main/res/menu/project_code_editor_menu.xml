@@ -15,12 +15,6 @@
         app:showAsAction="always" />
 
     <item
-        android:id="@+id/action_customize_generated"
-        android:icon="@drawable/ic_mtrl_save_as"
-        android:title="@string/file_explorer_menu_customize"
-        app:showAsAction="always" />
-
-    <item
         android:id="@+id/action_save"
         android:title="@string/common_word_save"
         android:icon="@drawable/ic_mtrl_save"

@@ -54,4 +54,7 @@
     <dimen name="recycler_view_item_spacing">6dp</dimen>
     
     <dimen name="dialog_action_size">100dp</dimen>
+
+    <!-- Code Mode: one tree level of indentation -->
+    <dimen name="file_explorer_indent">14dp</dimen>
 </resources>
