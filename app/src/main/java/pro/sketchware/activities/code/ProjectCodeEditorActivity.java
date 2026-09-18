@@ -34,6 +34,7 @@ import java.io.File;
 import java.lang.reflect.Type;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 
 import io.github.rosemoe.sora.event.SelectionChangeEvent;
 import io.github.rosemoe.sora.lang.EmptyLanguage;
@@ -58,22 +59,24 @@ import pro.sketchware.utility.ThemeUtils;
 import pro.sketchware.utility.UI;
 
 /**
- * Code Mode editor: edits the real project source files of a Sketchware Pro project
- * (".sketchware/data/&lt;sc_id&gt;/files/**"). Files opened here are the exact files the
- * build pipeline consumes:
- * <ul>
- *     <li>ECJ compiles files/java, files/broadcast and files/service,</li>
- *     <li>kotlinc compiles any .kt inside those directories,</li>
- *     <li>aapt2 compiles files/resource,</li>
- *     <li>files/assets are packaged as-is.</li>
- * </ul>
- * Multiple files can be open at once (tabs). Unsaved changes are preserved when
- * switching tabs, and the open-file list survives process death; unsaved content
- * is persisted on {@link #onStop()} and offered for restoration on reopen.
+ * Code Mode editor: edits the real source files of a Sketchware Pro project - the
+ * Android project directory at ".sketchware/mysc/&lt;sc_id&gt;", which is what a build
+ * compiles.
  * <p>
- * The activity also hosts a read-only preview mode for block-generated files
- * (activities/layouts that only exist as block metadata): the generated source is
- * shown and can be materialized into the user-owned tree via "Customize".
+ * A build wipes and regenerates that directory from block metadata, so every save is
+ * mirrored to the file a build really reads for that path (see
+ * {@link ProjectWorkspace#resolveOverrideFor}): {@code files/java} for Java and Kotlin,
+ * {@code files/resource} for resources, {@code files/AndroidManifest.xml} for the
+ * manifest and {@code files/gradle/...} for build files. For a file block mode owns, that
+ * same copy is what stops the generator emitting the file again, so a manual edit is
+ * never overwritten.
+ * <p>
+ * Multiple files can be open at once (tabs). Unsaved changes are preserved when
+ * switching tabs, and the open-file list survives process death; unsaved content is
+ * persisted on {@link #onStop()} and offered for restoration on reopen.
+ * <p>
+ * "View generated source" opens a block-generated file's current output in an editable
+ * buffer; saving that buffer creates the user's own copy of the file.
  */
 public class ProjectCodeEditorActivity extends BaseAppCompatActivity {
 
@@ -82,7 +85,7 @@ public class ProjectCodeEditorActivity extends BaseAppCompatActivity {
     public static final String EXTRA_OPEN_PATH = "open_path";
     /** Optional: view a generated file by name (read-only preview). */
     public static final String EXTRA_VIEW_NAME = "view_name";
-    /** Optional: absolute path the customized copy should be written to. */
+    /** Optional: the project file a generated-file preview belongs to. */
     public static final String EXTRA_VIEW_TARGET = "view_target";
 
     private static final String PREFS_NAME = "project_code_editor";
@@ -463,12 +466,46 @@ public class ProjectCodeEditorActivity extends BaseAppCompatActivity {
             return false;
         }
         if (session.save(session.getCurrentContent())) {
+            // A build regenerates the Android project directory, so the edit also has to
+            // reach the project-owned file the compiler reads.
+            writeProjectOwnCopy(session.getFilePath(), session.getCurrentContent());
             tabsAdapter.notifyItemChanged(index);
             SketchwareUtil.toast(Helper.getResString(R.string.common_word_saved));
             updateTitle();
             return true;
         }
         return false;
+    }
+
+    /**
+     * Persists an edited project file to the location a build reads it from, and notes
+     * that the project's Android project directory is now up to date with it.
+     */
+    private void writeProjectOwnCopy(@NonNull String filePath, @NonNull String content) {
+        String fileName = new File(filePath).getName();
+        try {
+            ProjectWorkspace workspace = ProjectWorkspace.load(scId);
+            if (!workspace.contains(filePath)) {
+                // Not part of this project's Android project directory: nothing to mirror.
+                return;
+            }
+            String ownCopy = workspace.resolveOverrideFor(filePath);
+            if (ownCopy == null || ownCopy.equals(filePath)) {
+                return;
+            }
+            File target = new File(ownCopy);
+            File parent = target.getParentFile();
+            if (parent != null && !parent.exists()) {
+                FileUtil.makeDir(parent.getAbsolutePath());
+            }
+            if (SourceEditorSession.writeContent(ownCopy, content)) {
+                workspace.noteSaved();
+            } else {
+                SketchwareUtil.toastError(getString(R.string.code_editor_own_copy_failed, fileName));
+            }
+        } catch (Throwable t) {
+            SketchwareUtil.toastError(getString(R.string.code_editor_own_copy_failed, fileName));
+        }
     }
 
     private void saveAllSessions() {
@@ -626,20 +663,20 @@ public class ProjectCodeEditorActivity extends BaseAppCompatActivity {
             return;
         }
         String targetPath = preview.overrideTarget;
-        String title = preview.name;
         File target = new File(targetPath);
         File parent = target.getParentFile();
         if (parent != null && !parent.exists() && !parent.mkdirs()) {
             SketchwareUtil.toastError(getString(R.string.file_explorer_error_create_failed));
             return;
         }
-        if (!SourceEditorSession.writeContent(targetPath, binding.editor.getText().toString())) {
+        String content = binding.editor.getText().toString();
+        if (!SourceEditorSession.writeContent(targetPath, content)) {
             SketchwareUtil.toastError(getString(R.string.file_explorer_error_create_failed));
             return;
         }
-        ProjectFileCatalog catalog = ProjectFileCatalog.load(scId);
-        catalog.markCustomized(toFilesRelative(scId, targetPath), "", title);
-        SketchwareUtil.toast(getString(R.string.file_explorer_customized_toast, title));
+        // The project's own copy is what the next build actually compiles.
+        writeProjectOwnCopy(targetPath, content);
+        SketchwareUtil.toast(Helper.getResString(R.string.common_word_saved));
 
         // Hand the buffer over to a normal session so further edits save directly.
         generatedPreview = null;
@@ -659,21 +696,26 @@ public class ProjectCodeEditorActivity extends BaseAppCompatActivity {
 
     //region Open-file picker ("+" button)
 
+    /** Extensions offered by the open-file picker: everything a build reads as text. */
+    private static final String[] OPENABLE_EXTENSIONS = {
+            ".java", ".kt", ".kts", ".xml", ".gradle", ".properties", ".pro", ".json", ".txt", ".md"
+    };
+
     private void showOpenFilePicker() {
-        // Recursively collect project source files under the user-owned tree.
-        File root = new File(FileUtil.getExternalStorageDir(), ".sketchware/data/" + scId + "/files");
+        // Recursively collect the project's readable source files.
+        String root = ProjectWorkspace.workspaceRoot(scId);
         List<String> paths = new ArrayList<>();
-        collectFiles(root, paths, 0);
+        collectFiles(new File(root), paths, 0);
         if (paths.isEmpty()) {
-            SketchwareUtil.toast("No files yet. Create one in the Files screen.");
+            SketchwareUtil.toast("No source files yet. Create one in the Files screen.");
             return;
         }
         paths.sort((a, b) -> a.compareToIgnoreCase(b));
+        String prefix = root.endsWith(File.separator) ? root : root + File.separator;
         String[] labels = new String[paths.size()];
         for (int i = 0; i < paths.size(); i++) {
-            String p = paths.get(i).replace('\\', '/');
-            int idx = p.indexOf("/files/");
-            labels[i] = idx >= 0 ? p.substring(idx + "/files/".length()) : p;
+            String path = paths.get(i);
+            labels[i] = path.startsWith(prefix) ? path.substring(prefix.length()) : path;
         }
         new MaterialAlertDialogBuilder(this)
                 .setTitle(R.string.code_editor_open_file)
@@ -682,28 +724,8 @@ public class ProjectCodeEditorActivity extends BaseAppCompatActivity {
                 .show();
     }
 
-    /**
-     * Converts an absolute path under .sketchware/data/&lt;sc_id&gt;/files into the sc-relative
-     * form the catalog uses ("files/&lt;relative&gt;"). Falls back to the absolute path.
-     */
-    @NonNull
-    private static String toFilesRelative(@NonNull String scId, @NonNull String absolutePath) {
-        String filesRoot = new File(FileUtil.getExternalStorageDir(),
-                ".sketchware/data/" + scId + "/files").getAbsolutePath();
-        String path = absolutePath.replace('\\', '/');
-        String root = filesRoot.replace('\\', '/');
-        if (path.startsWith(root)) {
-            String relative = path.substring(root.length());
-            if (relative.startsWith("/")) {
-                relative = relative.substring(1);
-            }
-            return "files/" + relative;
-        }
-        return absolutePath;
-    }
-
     private static void collectFiles(@NonNull File dir, @NonNull List<String> out, int depth) {
-        if (depth > 6) {
+        if (depth > 12) {
             return;
         }
         File[] children = dir.listFiles();
@@ -711,9 +733,21 @@ public class ProjectCodeEditorActivity extends BaseAppCompatActivity {
             return;
         }
         for (File child : children) {
+            String name = child.getName();
+            if (name.startsWith(".")) {
+                continue;
+            }
             if (child.isFile()) {
-                out.add(child.getAbsolutePath());
-            } else if (child.isDirectory()) {
+                String lower = name.toLowerCase(Locale.ROOT);
+                for (String extension : OPENABLE_EXTENSIONS) {
+                    if (lower.endsWith(extension)) {
+                        out.add(child.getAbsolutePath());
+                        break;
+                    }
+                }
+            } else if (child.isDirectory()
+                    // Build outputs are noise, and huge; never walk into them.
+                    && !name.equals("bin") && !name.equals("gen") && !name.equals("build")) {
                 collectFiles(child, out, depth + 1);
             }
         }

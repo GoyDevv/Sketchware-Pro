@@ -36,11 +36,10 @@ import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
-import java.util.Map;
 import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
-import a.a.a.jC;
-import a.a.a.lC;
 import mod.hey.studios.util.Helper;
 import pro.sketchware.R;
 import pro.sketchware.databinding.ActivityProjectFileExplorerBinding;
@@ -51,17 +50,18 @@ import pro.sketchware.utility.SketchwareUtil;
 import pro.sketchware.utility.UI;
 
 /**
- * Code Mode entry point: a real, collapsible file tree of the project that is
- * currently open in Sketchware Pro.
+ * Code Mode entry point: the file tree of the project that is open in Sketchware Pro.
  * <p>
- * The tree is rooted at the project's source directory
- * ({@code .sketchware/data/&lt;sc_id&gt;/files}) - the exact directory the build
- * pipeline reads: {@code java/} is compiled by kotlinc + ECJ, {@code resource/}
- * is merged by aapt2 and {@code assets/} is packaged as-is. Folders are listed
- * from the real filesystem on demand (never hardcoded), and block-generated
- * activities/layouts are merged in as virtual entries at the position where
- * their customized copy would live, so a project that has never been built still
- * shows its true structure.
+ * The tree is rooted at the project's real Android project directory
+ * ({@code .sketchware/mysc/&lt;sc_id&gt;}) - the very directory a build compiles: it holds
+ * {@code app/src/main/java/&lt;package&gt;}, {@code res/}, {@code assets/},
+ * {@code AndroidManifest.xml} and the {@code build.gradle} files. A build regenerates that
+ * directory from block metadata, so {@link ProjectWorkspace#prepare} materializes it the same
+ * way, and then folds the project's user-owned files in.
+ * <p>
+ * Every row is a real file: nothing is virtual, and nothing is hardcoded. Files block mode owns
+ * are badged, and saving one writes the project's own copy to the location the compilers read,
+ * so block mode never silently overwrites a manual edit.
  */
 public class ProjectFileExplorerActivity extends BaseAppCompatActivity
         implements ProjectFileTreeAdapter.Listener, ProjectFileTreeAdapter.ChildrenProvider {
@@ -72,32 +72,36 @@ public class ProjectFileExplorerActivity extends BaseAppCompatActivity
     private static final String KEY_EXPANDED = "expanded_";
     private static final String KEY_HIDDEN = "show_hidden";
 
+    /** Packages a Java/Kotlin file declares, used to place newly created classes. */
+    private static final Pattern PACKAGE_DECLARATION =
+            Pattern.compile("(?m)^\\s*package\\s+([\\w.]+)\\s*;?");
+    /** The file's own type declaration, used to seed a renamed class. */
+    private static final Pattern TYPE_DECLARATION = Pattern.compile(
+            "(?m)^(\\s*(?:public\\s+|final\\s+|abstract\\s+)*)(class|interface|enum|object|record)\\s+([A-Za-z_$][\\w$]*)");
+
     /** Pending clipboard file for copy/cut (cut removes the source on paste). */
     private enum ClipboardOp {COPY, CUT}
 
     private ActivityProjectFileExplorerBinding binding;
     private ProjectFileTreeAdapter adapter;
-    /** Every source file the project is built from, generated ones included. */
-    private ProjectSourceIndex sourceIndex;
-    private ProjectFileCatalog catalog;
+    /** Read from the adapter's listing thread, so it is reassigned safely. */
+    private volatile ProjectWorkspace workspace;
     private FileResConfig frc;
     private SharedPreferences prefs;
 
     private String scId;
-    /** {@code .sketchware/data/<sc_id>/files}: the project's own source tree. */
-    private String filesRoot;
-    private String javaRoot;
-    private String resourceRoot;
-    private String assetsRoot;
-    private String broadcastRoot;
-    private String serviceRoot;
     private String projectName;
+    private String workspaceRoot;
+    private String javaRoot;
 
     private String clipboardPath;
     private ClipboardOp clipboardOp;
-    private boolean showHiddenFiles;
+    /** Read from the adapter's listing thread. */
+    private volatile boolean showHiddenFiles;
     /** Skips the redundant refresh triggered by the very first {@code onResume}. */
     private boolean firstResume = true;
+    /** Guards against overlapping materializations. */
+    private boolean preparing;
     /** Directory the SAF import places files into. */
     @Nullable
     private String importTargetDir;
@@ -119,28 +123,19 @@ public class ProjectFileExplorerActivity extends BaseAppCompatActivity
         prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
         showHiddenFiles = prefs.getBoolean(KEY_HIDDEN, false);
 
-        FilePathUtil fpu = new FilePathUtil();
-        filesRoot = new File(fpu.getPathJava(scId)).getParentFile().getAbsolutePath();
-        javaRoot = fpu.getPathJava(scId);
-        resourceRoot = fpu.getPathResource(scId);
-        assetsRoot = fpu.getPathAssets(scId);
-        broadcastRoot = fpu.getPathBroadcast(scId);
-        serviceRoot = fpu.getPathService(scId);
-        projectName = resolveProjectName();
-
-        catalog = ProjectFileCatalog.load(scId);
-        // Drop records for override files that no longer exist (deleted elsewhere).
-        catalog.pruneMissing();
+        workspace = ProjectWorkspace.load(scId);
+        workspaceRoot = workspace.getRoot();
+        projectName = workspace.getProjectName();
+        javaRoot = new File(workspaceRoot, "app/src/main/java").getAbsolutePath();
         frc = new FileResConfig(scId);
-        sourceIndex = ProjectSourceIndex.create(scId);
 
         setSupportActionBar(binding.toolbar);
         binding.toolbar.setTitle(projectName);
         binding.toolbar.setSubtitle(getString(R.string.file_explorer_subtitle));
         binding.toolbar.setNavigationOnClickListener(v -> getOnBackPressedDispatcher().onBackPressed());
 
-        // Window insets: the app-bar draws behind the status bar and pads its own
-        // content; the bottom inset keeps rows and the FAB clear of the nav bar.
+        // Window insets: the app bar paints behind the status bar and pads its own content;
+        // the bottom inset keeps rows and the FAB clear of the navigation bar.
         UI.addSystemWindowInsetToPadding(binding.appBarLayout, true, true, true, false);
         UI.addSystemWindowInsetToPadding(binding.fileList, false, false, false, true);
         UI.addSystemWindowInsetToPadding(binding.noFilesLayout, false, false, false, true);
@@ -149,7 +144,6 @@ public class ProjectFileExplorerActivity extends BaseAppCompatActivity
         adapter = new ProjectFileTreeAdapter(this, this);
         adapter.setRenderListener(this::updateEmptyState);
         binding.fileList.setLayoutManager(new LinearLayoutManager(this));
-        // Expansion and collapse animate instead of snapping.
         DefaultItemAnimator animator = new DefaultItemAnimator();
         animator.setAddDuration(180L);
         animator.setRemoveDuration(160L);
@@ -159,54 +153,81 @@ public class ProjectFileExplorerActivity extends BaseAppCompatActivity
         binding.fileList.setItemAnimator(animator);
         binding.fileList.setAdapter(adapter);
 
-        // Every one of these is read by the build (ECJ compiles files/java,
-        // files/broadcast and files/service; aapt2 overlays files/resource; the
-        // packager bundles files/assets), so they are the project's real layout.
-        // Creating them also guarantees a meaningful tree instead of an empty screen.
-        ensureDirectoryExists(new File(javaRoot));
-        ensureDirectoryExists(new File(resourceRoot));
-        ensureDirectoryExists(new File(assetsRoot));
-        ensureDirectoryExists(new File(broadcastRoot));
-        ensureDirectoryExists(new File(serviceRoot));
-        for (String directory : sourceIndex.requiredDirectories()) {
-            ensureDirectoryExists(new File(directory));
-        }
-
         restoreExpandedPaths();
-        adapter.setRoot(ProjectFileTreeAdapter.project(projectName, filesRoot));
+        adapter.setRoot(ProjectFileTreeAdapter.project(projectName, workspaceRoot));
 
         binding.newFileButton.setOnClickListener(v -> promptCreate(true, defaultCreateTarget()));
+        binding.retryButton.setOnClickListener(v -> prepareWorkspace(true));
 
         if (savedInstanceState == null) {
-            enrichSourceIndex();
+            prepareWorkspace(false);
         }
     }
 
+    //region Materialization
+
     /**
-     * Completes the tree with the files Sketchware's generator produces but that have
-     * no on-disk copy yet. Runs in the background so the screen is usable immediately;
-     * the metadata-derived entries are already on screen by the time it finishes.
+     * Makes sure the project's Android project directory on disk matches the project's
+     * current metadata, then shows it. Runs off the main thread because it generates
+     * every screen's source, exactly as a build does.
      */
-    private void enrichSourceIndex() {
+    private void prepareWorkspace(boolean force) {
+        if (preparing) {
+            return;
+        }
+        if (!force && ProjectWorkspace.isPrepared(scId)) {
+            adapter.invalidateAndReload();
+            return;
+        }
+        preparing = true;
         binding.progress.setVisibility(View.VISIBLE);
         new Thread(() -> {
-            int added = sourceIndex.enrichFromGenerator(getApplicationContext(), scId);
+            String failure = null;
+            try {
+                ProjectWorkspace.prepare(getApplicationContext(), scId);
+            } catch (Throwable t) {
+                failure = t.getMessage() == null ? t.getClass().getSimpleName() : t.getMessage();
+            }
+            String reported = failure;
             runOnUiThread(() -> {
-                if (isFinishing() || isDestroyed() || adapter == null) {
+                if (isFinishing() || isDestroyed() || binding == null) {
                     return;
                 }
+                preparing = false;
                 binding.progress.setVisibility(View.GONE);
-                if (added > 0) {
-                    adapter.invalidateAndReload();
+                workspace = ProjectWorkspace.load(scId);
+                adapter.invalidateAndReload();
+                if (reported != null) {
+                    SketchwareUtil.toastError(getString(R.string.file_explorer_prepare_failed, reported));
                 }
             });
-        }, "ProjectSourceIndex").start();
+        }, "ProjectWorkspace").start();
+    }
+
+    /**
+     * Shows the explanation only once the project root has actually been listed and
+     * turned out to hold nothing, so no empty state ever flashes while loading.
+     */
+    private void updateEmptyState() {
+        if (adapter == null || preparing) {
+            return;
+        }
+        boolean empty = adapter.isLoaded(workspaceRoot) && !adapter.hasChildren(workspaceRoot);
+        boolean blocked = empty && !new File(workspaceRoot).canRead();
+        binding.noFilesLayout.setVisibility(empty ? View.VISIBLE : View.GONE);
+        binding.fileList.setVisibility(empty ? View.GONE : View.VISIBLE);
+        binding.emptyTitle.setText(blocked
+                ? R.string.file_explorer_empty_blocked_title
+                : R.string.file_explorer_empty_title);
+        binding.emptyBody.setText(blocked
+                ? R.string.file_explorer_empty_blocked_body
+                : R.string.file_explorer_empty_body);
+        binding.retryButton.setVisibility(blocked ? View.VISIBLE : View.GONE);
     }
 
     @Override
     protected void onSaveInstanceState(@NonNull Bundle outState) {
         super.onSaveInstanceState(outState);
-        // Expansion state is also persisted in prefs; this covers rotation.
         if (adapter != null) {
             persistExpandedPaths();
         }
@@ -239,50 +260,11 @@ public class ProjectFileExplorerActivity extends BaseAppCompatActivity
             firstResume = false;
             return;
         }
-        // Pick up anything another manager (or a build) changed meanwhile.
-        adapter.invalidateAndReload();
+        // Blocks may have been edited (or the project rebuilt) while this screen slept.
+        prepareWorkspace(false);
     }
 
-    /**
-     * Shows the explanation only once the project root has actually been listed and
-     * turned out to be empty - for example when storage access was denied and the
-     * source folders could not be created. While the listing is still in flight the
-     * tree stays on screen, so no empty state ever flashes during loading.
-     */
-    private void updateEmptyState() {
-        if (adapter == null) {
-            return;
-        }
-        boolean empty = adapter.isLoaded(filesRoot) && !adapter.hasChildren(filesRoot);
-        binding.noFilesLayout.setVisibility(empty ? View.VISIBLE : View.GONE);
-        binding.fileList.setVisibility(empty ? View.GONE : View.VISIBLE);
-    }
-
-    private void ensureDirectoryExists(@NonNull File directory) {
-        if (!directory.exists() && !directory.mkdirs()) {
-            SketchwareUtil.toastError("Could not create " + directory.getName());
-        }
-    }
-
-    @NonNull
-    private String resolveProjectName() {
-        try {
-            Map<String, Object> metadata = lC.b(scId);
-            if (metadata != null) {
-                Object name = metadata.get("my_ws_name");
-                if (name instanceof String && !((String) name).isEmpty()) {
-                    return (String) name;
-                }
-                Object appName = metadata.get("my_app_name");
-                if (appName instanceof String && !((String) appName).isEmpty()) {
-                    return (String) appName;
-                }
-            }
-        } catch (Exception ignored) {
-            // Fall through to the project id.
-        }
-        return scId;
-    }
+    //endregion
 
     //region Tree building (called on a background thread)
 
@@ -290,56 +272,49 @@ public class ProjectFileExplorerActivity extends BaseAppCompatActivity
     @Override
     public List<ProjectFileTreeAdapter.Node> childrenOf(@NonNull String directory) {
         List<ProjectFileTreeAdapter.Node> result = new ArrayList<>();
-        List<File> directories = new ArrayList<>();
-        List<File> diskFiles = new ArrayList<>();
-        Set<String> diskFileNames = new LinkedHashSet<>();
-
         File[] entries = new File(directory).listFiles();
-        if (entries != null) {
-            for (File entry : entries) {
-                if (!showHiddenFiles && entry.getName().startsWith(".")) {
+        if (entries == null) {
+            return result;
+        }
+        List<File> directories = new ArrayList<>();
+        List<File> files = new ArrayList<>();
+        for (File entry : entries) {
+            String entryName = entry.getName();
+            if (entryName.equals(ProjectWorkspace.INDEX_FILE_NAME)
+                    || (!showHiddenFiles && entryName.startsWith("."))) {
+                continue;
+            }
+            if (entry.isDirectory()) {
+                // Build outputs, not project sources: they can be huge and tell nothing.
+                if (entryName.equals("bin") || entryName.equals("gen") || entryName.equals("build")) {
                     continue;
                 }
-                if (entry.isDirectory()) {
-                    directories.add(entry);
-                } else {
-                    diskFiles.add(entry);
-                    diskFileNames.add(entry.getName());
-                }
+                directories.add(entry);
+            } else {
+                files.add(entry);
             }
         }
         directories.sort((a, b) -> a.getName().compareToIgnoreCase(b.getName()));
+        files.sort((a, b) -> a.getName().compareToIgnoreCase(b.getName()));
 
         for (File child : directories) {
             File[] inner = child.listFiles();
-            int childCount = inner == null ? 0 : inner.length;
-            result.add(ProjectFileTreeAdapter.directory(child.getName(),
-                    child.getAbsolutePath(), childCount));
-        }
-
-        // Files you own and files Sketchware generates share one alphabetical list,
-        // so a generated MainActivity.java sits beside a hand-written Helper.java
-        // exactly as it would in the real source tree.
-        List<ProjectFileTreeAdapter.Node> files = new ArrayList<>();
-        for (File child : diskFiles) {
-            files.add(ProjectFileTreeAdapter.file(child.getName(), child.getAbsolutePath(),
-                    catalog.findByOverride(toScRelative(child.getAbsolutePath())) != null));
-        }
-        for (ProjectSourceIndex.Entry entry : sourceIndex.inDirectory(directory)) {
-            if (diskFileNames.contains(entry.name)) {
-                continue;
+            int visible = 0;
+            if (inner != null) {
+                for (File entry : inner) {
+                    if (showHiddenFiles || !entry.getName().startsWith(".")) {
+                        visible++;
+                    }
+                }
             }
-            files.add(ProjectFileTreeAdapter.generated(entry.name,
-                    new File(directory, entry.name).getAbsolutePath(), entry.kind));
+            result.add(ProjectFileTreeAdapter.directory(child.getName(),
+                    child.getAbsolutePath(), visible));
         }
-        if (filesRoot.equals(directory)) {
-            // The manifest is generated from project metadata and has no override
-            // file, so it is edited through Sketchware's own manifest editor.
-            files.add(ProjectFileTreeAdapter.generated("AndroidManifest.xml", "",
-                    ProjectFileTreeAdapter.KIND_MANIFEST));
+        for (File child : files) {
+            String path = child.getAbsolutePath();
+            result.add(ProjectFileTreeAdapter.file(child.getName(), path,
+                    workspace.isGenerated(path), workspace.isOverridden(path)));
         }
-        files.sort((a, b) -> a.name.compareToIgnoreCase(b.name));
-        result.addAll(files);
         return result;
     }
 
@@ -372,16 +347,6 @@ public class ProjectFileExplorerActivity extends BaseAppCompatActivity
             adapter.toggle(node);
             return;
         }
-        if (ProjectFileTreeAdapter.TYPE_GENERATED == node.type) {
-            if (ProjectFileTreeAdapter.KIND_MANIFEST.equals(node.generatedKind)) {
-                // The manifest is generated from metadata and has no override file, so
-                // tapping it opens the editor that can actually change it.
-                openManifestEditor();
-            } else {
-                openGeneratedPreview(node);
-            }
-            return;
-        }
         openInEditor(node.path);
     }
 
@@ -398,76 +363,63 @@ public class ProjectFileExplorerActivity extends BaseAppCompatActivity
         List<String> actions = new ArrayList<>();
         List<Runnable> runners = new ArrayList<>();
 
-        switch (node.type) {
-            case ProjectFileTreeAdapter.TYPE_DIRECTORY -> {
-                actions.add(getString(R.string.file_explorer_menu_new_file));
-                runners.add(() -> promptCreate(true, node.path));
-                actions.add(getString(R.string.file_explorer_menu_new_folder));
-                runners.add(() -> promptCreate(false, node.path));
-                if (node.path.equals(filesRoot)) {
-                    actions.add(getString(R.string.file_explorer_menu_view_manifest));
-                    runners.add(this::viewManifest);
-                    actions.add(getString(R.string.file_explorer_menu_edit_manifest));
-                    runners.add(this::openManifestEditor);
-                }
-                actions.add(getString(R.string.file_explorer_menu_import_here));
-                runners.add(() -> startImport(node.path));
-                actions.add(getString(R.string.file_explorer_menu_paste_into));
-                runners.add(() -> pasteInto(new File(node.path)));
-                actions.add(getString(R.string.common_word_copy));
-                runners.add(() -> copyToClipboard(node, ClipboardOp.COPY));
-                actions.add(getString(R.string.common_word_cut));
-                runners.add(() -> copyToClipboard(node, ClipboardOp.CUT));
-                actions.add(getString(R.string.file_explorer_menu_duplicate));
-                runners.add(() -> promptDuplicate(node));
-                if (!node.path.equals(filesRoot)) {
-                    actions.add(getString(R.string.common_word_rename));
-                    runners.add(() -> promptRename(node));
-                    actions.add(getString(R.string.common_word_delete));
-                    runners.add(() -> confirmDelete(node));
-                }
-            }
-            case ProjectFileTreeAdapter.TYPE_GENERATED -> {
-                if (ProjectFileTreeAdapter.KIND_MANIFEST.equals(node.generatedKind)) {
-                    actions.add(getString(R.string.file_explorer_menu_view_manifest));
-                    runners.add(this::viewManifest);
-                    actions.add(getString(R.string.file_explorer_menu_edit_manifest));
-                    runners.add(this::openManifestEditor);
-                } else {
-                    actions.add(getString(R.string.file_explorer_menu_view_generated));
-                    runners.add(() -> openGeneratedPreview(node));
-                    actions.add(getString(R.string.file_explorer_menu_customize));
-                    runners.add(() -> customizeGenerated(node));
-                }
-            }
-            default -> {
-                actions.add(getString(R.string.common_word_edit));
-                runners.add(() -> openInEditor(node.path));
-                actions.add(getString(R.string.file_explorer_menu_duplicate));
-                runners.add(() -> promptDuplicate(node));
-                actions.add(getString(R.string.common_word_copy));
-                runners.add(() -> copyToClipboard(node, ClipboardOp.COPY));
-                actions.add(getString(R.string.common_word_cut));
-                runners.add(() -> copyToClipboard(node, ClipboardOp.CUT));
-                File parent = new File(node.path).getParentFile();
-                actions.add(getString(R.string.file_explorer_menu_import_here));
-                runners.add(() -> startImport(parent == null ? null : parent.getAbsolutePath()));
-                if (isRegisterableSource(node)) {
-                    boolean registered = frc.getJavaManifestList().contains(registeredClassName(node));
-                    actions.add(getString(registered
-                            ? R.string.file_explorer_menu_manifest_remove_activity
-                            : R.string.file_explorer_menu_manifest_add_activity));
-                    runners.add(() -> registerInManifest(node, !registered));
-                }
-                if (catalog.findByOverride(toScRelative(node.path)) != null) {
-                    actions.add(getString(R.string.file_explorer_menu_reset_generated));
-                    runners.add(() -> confirmResetToGenerated(node));
-                }
+        if (node.isDirectory()) {
+            boolean isRoot = node.path.equals(workspaceRoot);
+            actions.add(getString(R.string.file_explorer_menu_new_file));
+            runners.add(() -> promptCreate(true, node.path));
+            actions.add(getString(R.string.file_explorer_menu_new_folder));
+            runners.add(() -> promptCreate(false, node.path));
+            actions.add(getString(R.string.file_explorer_menu_import_here));
+            runners.add(() -> startImport(node.path));
+            actions.add(getString(R.string.file_explorer_menu_paste_into));
+            runners.add(() -> pasteInto(new File(node.path)));
+            actions.add(getString(R.string.common_word_copy));
+            runners.add(() -> copyToClipboard(node, ClipboardOp.COPY));
+            actions.add(getString(R.string.common_word_cut));
+            runners.add(() -> copyToClipboard(node, ClipboardOp.CUT));
+            actions.add(getString(R.string.file_explorer_menu_duplicate));
+            runners.add(() -> promptDuplicate(node));
+            if (!isRoot) {
                 actions.add(getString(R.string.common_word_rename));
                 runners.add(() -> promptRename(node));
                 actions.add(getString(R.string.common_word_delete));
                 runners.add(() -> confirmDelete(node));
             }
+        } else {
+            actions.add(getString(R.string.common_word_edit));
+            runners.add(() -> openInEditor(node.path));
+            if (node.generated) {
+                actions.add(getString(R.string.file_explorer_menu_view_generated));
+                runners.add(() -> viewGeneratedSource(node));
+            }
+            if (node.overridden) {
+                actions.add(getString(R.string.file_explorer_menu_reset_generated));
+                runners.add(() -> confirmResetToGenerated(node));
+            }
+            actions.add(getString(R.string.file_explorer_menu_duplicate));
+            runners.add(() -> promptDuplicate(node));
+            actions.add(getString(R.string.common_word_copy));
+            runners.add(() -> copyToClipboard(node, ClipboardOp.COPY));
+            actions.add(getString(R.string.common_word_cut));
+            runners.add(() -> copyToClipboard(node, ClipboardOp.CUT));
+            actions.add(getString(R.string.file_explorer_menu_copy_path));
+            runners.add(() -> copyPathToClipboard(node));
+            File parent = new File(node.path).getParentFile();
+            actions.add(getString(R.string.file_explorer_menu_import_here));
+            runners.add(() -> startImport(parent == null ? null : parent.getAbsolutePath()));
+            if (isRegisterableSource(node)) {
+                boolean registered = frc.getJavaManifestList().contains(registeredClassName(node));
+                actions.add(getString(registered
+                        ? R.string.file_explorer_menu_manifest_remove_activity
+                        : R.string.file_explorer_menu_manifest_add_activity));
+                runners.add(() -> registerInManifest(node, !registered));
+            }
+            if (isRenamable(node)) {
+                actions.add(getString(R.string.common_word_rename));
+                runners.add(() -> promptRename(node));
+            }
+            actions.add(getString(R.string.common_word_delete));
+            runners.add(() -> confirmDelete(node));
         }
         actions.add(getString(R.string.common_word_cancel));
 
@@ -482,8 +434,8 @@ public class ProjectFileExplorerActivity extends BaseAppCompatActivity
     }
 
     /**
-     * Creates a file or folder. The dialog lets the user pick the destination
-     * folder, so anything can be created anywhere in the project from one place.
+     * Creates a file or folder. The dialog lets the user pick the destination folder,
+     * so anything can be created anywhere in the project from one place.
      */
     private void promptCreate(boolean isFile, @NonNull String targetDir) {
         View dialogRoot = getLayoutInflater().inflate(R.layout.dialog_project_file_create, null);
@@ -536,6 +488,10 @@ public class ProjectFileExplorerActivity extends BaseAppCompatActivity
                     nameLayout.setError(getString(R.string.file_explorer_error_create_failed));
                     return;
                 }
+                // Remember where this file lives for builds, then show it.
+                if (isFile) {
+                    workspace.resolveOverrideFor(target.getAbsolutePath());
+                }
                 dialog.dismiss();
                 persistExpandedPaths();
                 adapter.setExpanded(targetDirectory.getAbsolutePath(), true);
@@ -550,14 +506,12 @@ public class ProjectFileExplorerActivity extends BaseAppCompatActivity
         dialog.show();
     }
 
-    /** All directories below the project root, shallowest first. */
+    /** All directories of the project, so anything can be created anywhere. */
     @NonNull
     private List<String> collectFolders() {
         List<String> folders = new ArrayList<>();
-        collectFolders(new File(filesRoot), folders);
-        if (folders.isEmpty()) {
-            folders.add(filesRoot);
-        }
+        folders.add(workspaceRoot);
+        collectFolders(new File(workspaceRoot), folders);
         return folders;
     }
 
@@ -568,9 +522,12 @@ public class ProjectFileExplorerActivity extends BaseAppCompatActivity
         }
         List<File> directories = new ArrayList<>();
         for (File entry : entries) {
-            if (entry.isDirectory() && (showHiddenFiles || !entry.getName().startsWith("."))) {
-                directories.add(entry);
+            String name = entry.getName();
+            if (!entry.isDirectory() || (!showHiddenFiles && name.startsWith("."))
+                    || name.equals("bin") || name.equals("gen") || name.equals("build")) {
+                continue;
             }
+            directories.add(entry);
         }
         directories.sort((a, b) -> a.getName().compareToIgnoreCase(b.getName()));
         for (File child : directories) {
@@ -581,20 +538,24 @@ public class ProjectFileExplorerActivity extends BaseAppCompatActivity
         }
     }
 
-    /** {@code files/java} - the source root - is where new classes belong. */
+    /** New classes belong in the project's package folder. */
     @NonNull
     private String defaultCreateTarget() {
+        File packageDir = new File(javaRoot, resolveAppPackageName().replace('.', File.separatorChar));
+        if (packageDir.isDirectory()) {
+            return packageDir.getAbsolutePath();
+        }
         File javaDir = new File(javaRoot);
-        return javaDir.isDirectory() ? javaRoot : filesRoot;
+        return javaDir.isDirectory() ? javaRoot : workspaceRoot;
     }
 
     @NonNull
     private String toDisplayPath(@NonNull String absolute) {
-        if (absolute.equals(filesRoot)) {
+        if (absolute.equals(workspaceRoot)) {
             return projectName;
         }
-        if (absolute.startsWith(filesRoot + File.separator)) {
-            return absolute.substring(filesRoot.length() + 1);
+        if (absolute.startsWith(workspaceRoot + File.separator)) {
+            return absolute.substring(workspaceRoot.length() + 1);
         }
         return absolute;
     }
@@ -606,12 +567,15 @@ public class ProjectFileExplorerActivity extends BaseAppCompatActivity
         layout.setHint(getString(R.string.file_explorer_hint_new_name));
         input.setInputType(InputType.TYPE_CLASS_TEXT);
         input.setText(node.name);
-        File parentFile = new File(node.path).getParentFile();
+        File source = new File(node.path);
+        File parentFile = source.getParentFile();
         if (parentFile == null) {
             return;
         }
+        boolean renameType = node.name.endsWith(".java") || node.name.endsWith(".kt");
         AlertDialog dialog = new MaterialAlertDialogBuilder(this)
                 .setTitle(R.string.common_word_rename)
+                .setMessage(getString(R.string.file_explorer_rename_message))
                 .setView(dialogRoot)
                 .setPositiveButton(R.string.common_word_rename, null)
                 .setNegativeButton(R.string.common_word_cancel, null)
@@ -630,19 +594,30 @@ public class ProjectFileExplorerActivity extends BaseAppCompatActivity
                     return;
                 }
                 File destination = new File(parentFile, name);
+                // The user-owned copy (what a build actually reads) moves with the file.
+                String previousOverride = workspace.overrideFor(node.path);
+                File movedOverride = previousOverride != null && FileUtil.isExistFile(previousOverride)
+                        ? new File(previousOverride) : null;
+                workspace.forgetOverride(node.path);
                 if (!FileUtil.renameFile(node.path, destination.getAbsolutePath())) {
                     layout.setError(getString(R.string.file_explorer_error_rename_failed));
                     return;
                 }
-                if (node.isDirectory()) {
-                    // The old path must not keep expansion or listing cache alive.
-                    adapter.forgetSubtree(node.path);
+                // A renamed class must keep matching its file name, or it cannot compile.
+                if (renameType) {
+                    renameTypeDeclaration(destination);
                 }
-                // Keep customization records pointing at the moved file.
-                ProjectFileCatalog.Entry entry = catalog.findByOverride(toScRelative(node.path));
-                if (entry != null) {
-                    catalog.removeByOverride(entry.overridePath);
-                    catalog.markCustomized(toScRelative(destination.getAbsolutePath()), "", name);
+                String newOverride = workspace.resolveOverrideFor(destination.getAbsolutePath());
+                if (movedOverride != null && newOverride != null
+                        && !movedOverride.getAbsolutePath().equals(newOverride)) {
+                    File parentOfNew = new File(newOverride).getParentFile();
+                    if (parentOfNew != null) {
+                        FileUtil.makeDir(parentOfNew.getAbsolutePath());
+                    }
+                    FileUtil.renameFile(movedOverride.getAbsolutePath(), newOverride);
+                }
+                if (node.isDirectory()) {
+                    adapter.forgetSubtree(node.path);
                 }
                 dialog.dismiss();
                 adapter.setExpanded(parentFile.getAbsolutePath(), true);
@@ -652,6 +627,33 @@ public class ProjectFileExplorerActivity extends BaseAppCompatActivity
             input.requestFocus();
         });
         dialog.show();
+    }
+
+    /** Keeps a class/interface/enum/object name in sync with its file name after a rename. */
+    private void renameTypeDeclaration(@NonNull File file) {
+        try {
+            String content = FileUtil.readFileIfExist(file.getAbsolutePath());
+            if (content.isEmpty()) {
+                return;
+            }
+            String simpleName = FileUtil.getFileNameNoExtension(file.getName());
+            Matcher matcher = TYPE_DECLARATION.matcher(content);
+            if (!matcher.find()) {
+                return;
+            }
+            String old = matcher.group(3);
+            if (old == null || old.equals(simpleName)) {
+                return;
+            }
+            String updated = matcher.replaceFirst(Matcher.quoteReplacement(
+                    matcher.group(1) + matcher.group(2) + " " + simpleName));
+            // Constructors share the class name and must be renamed with it.
+            updated = updated.replaceFirst("(?m)^(\\s*(?:public\\s+|private\\s+|protected\\s+)?)"
+                    + Pattern.quote(old) + "(\\s*\\()", "$1" + Matcher.quoteReplacement(simpleName) + "$2");
+            FileUtil.writeFile(file.getAbsolutePath(), updated);
+        } catch (Throwable ignored) {
+            // A file we cannot parse is left exactly as it is.
+        }
     }
 
     private void promptDuplicate(@NonNull ProjectFileTreeAdapter.Node node) {
@@ -686,6 +688,9 @@ public class ProjectFileExplorerActivity extends BaseAppCompatActivity
                     layout.setError(getString(R.string.file_explorer_error_create_failed));
                     return;
                 }
+                if (target.isFile()) {
+                    workspace.resolveOverrideFor(target.getAbsolutePath());
+                }
                 dialog.dismiss();
                 adapter.invalidateAndReload();
                 SketchwareUtil.toast(getString(R.string.file_explorer_duplicated_toast, name));
@@ -699,6 +704,10 @@ public class ProjectFileExplorerActivity extends BaseAppCompatActivity
     private void confirmDelete(@NonNull ProjectFileTreeAdapter.Node node) {
         File target = new File(node.path);
         File parentFile = target.getParentFile();
+        if (node.generated) {
+            confirmResetToGenerated(node);
+            return;
+        }
         int message = node.isDirectory()
                 ? R.string.file_explorer_delete_folder_message
                 : R.string.file_explorer_delete_message;
@@ -706,10 +715,8 @@ public class ProjectFileExplorerActivity extends BaseAppCompatActivity
                 .setTitle(R.string.common_word_delete)
                 .setMessage(getString(message, node.name))
                 .setPositiveButton(R.string.common_word_delete, (dialog, which) -> {
-                    FileUtil.deleteFile(target.getAbsolutePath());
-                    catalog.removeByOverride(toScRelative(target.getAbsolutePath()));
+                    deleteWithOverride(target);
                     if (node.isDirectory()) {
-                        // Nothing under the deleted folder may stay expanded or cached.
                         adapter.forgetSubtree(node.path);
                     }
                     SketchwareUtil.toast(Helper.getResString(R.string.common_word_deleted_successfully));
@@ -723,6 +730,25 @@ public class ProjectFileExplorerActivity extends BaseAppCompatActivity
                 .show();
     }
 
+    /** Deletes a file (and its user-owned copy) or a whole directory subtree. */
+    private void deleteWithOverride(@NonNull File target) {
+        if (target.isDirectory()) {
+            File[] children = target.listFiles();
+            if (children != null) {
+                for (File child : children) {
+                    deleteWithOverride(child);
+                }
+            }
+        } else {
+            String override = workspace.overrideFor(target.getAbsolutePath());
+            if (override != null && FileUtil.isExistFile(override)) {
+                FileUtil.deleteFile(override);
+            }
+        }
+        workspace.forgetOverride(target.getAbsolutePath());
+        FileUtil.deleteFile(target.getAbsolutePath());
+    }
+
     /** Remembers a file or folder for the next paste. */
     private void copyToClipboard(@NonNull ProjectFileTreeAdapter.Node node, @NonNull ClipboardOp op) {
         clipboardPath = node.path;
@@ -730,6 +756,15 @@ public class ProjectFileExplorerActivity extends BaseAppCompatActivity
         SketchwareUtil.toast(getString(op == ClipboardOp.CUT
                 ? R.string.file_explorer_cut_toast
                 : R.string.file_explorer_copied_toast, node.name));
+    }
+
+    private void copyPathToClipboard(@NonNull ProjectFileTreeAdapter.Node node) {
+        android.content.ClipboardManager clipboard =
+                (android.content.ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+        if (clipboard != null) {
+            clipboard.setPrimaryClip(android.content.ClipData.newPlainText(node.name, node.path));
+        }
+        SketchwareUtil.toast(getString(R.string.file_explorer_path_copied));
     }
 
     private void pasteInto(@NonNull File targetDir) {
@@ -752,8 +787,11 @@ public class ProjectFileExplorerActivity extends BaseAppCompatActivity
             SketchwareUtil.toastError(getString(R.string.file_explorer_error_create_failed));
             return;
         }
+        if (target.isFile()) {
+            workspace.resolveOverrideFor(target.getAbsolutePath());
+        }
         if (clipboardOp == ClipboardOp.CUT) {
-            FileUtil.deleteFile(source.getAbsolutePath());
+            deleteWithOverride(source);
             clipboardPath = null;
         }
         adapter.setExpanded(targetDir.getAbsolutePath(), true);
@@ -814,6 +852,7 @@ public class ProjectFileExplorerActivity extends BaseAppCompatActivity
             SketchwareUtil.toastError("Import failed: " + e.getMessage());
             return;
         }
+        workspace.resolveOverrideFor(target.getAbsolutePath());
         adapter.setExpanded(targetDir.getAbsolutePath(), true);
         adapter.invalidate(targetDir.getAbsolutePath());
         SketchwareUtil.toast(getString(R.string.file_explorer_imported_toast, name));
@@ -836,132 +875,84 @@ public class ProjectFileExplorerActivity extends BaseAppCompatActivity
 
     //endregion
 
-    //region Generated files (Code Mode <-> Block Mode bridge)
+    //region Block-generated files (Code Mode <-> Block Mode bridge)
 
-    private void openGeneratedPreview(@NonNull ProjectFileTreeAdapter.Node node) {
-        Intent intent = new Intent(getApplicationContext(), ProjectCodeEditorActivity.class);
-        intent.putExtra(ProjectCodeEditorActivity.EXTRA_SC_ID, scId);
-        intent.putExtra(ProjectCodeEditorActivity.EXTRA_VIEW_NAME, node.name);
-        intent.putExtra(ProjectCodeEditorActivity.EXTRA_VIEW_TARGET, node.path);
-        startActivity(intent);
+    /**
+     * Shows the source block mode would generate for this file, without touching the
+     * user's own copy.
+     */
+    private void viewGeneratedSource(@NonNull ProjectFileTreeAdapter.Node node) {
+        // The generator is asked for the file by name; the target tells the editor where
+        // an edit of that preview belongs, so saving still reaches the build.
+        startActivity(new Intent(getApplicationContext(), ProjectCodeEditorActivity.class)
+                .putExtra(ProjectCodeEditorActivity.EXTRA_SC_ID, scId)
+                .putExtra(ProjectCodeEditorActivity.EXTRA_VIEW_NAME, node.name)
+                .putExtra(ProjectCodeEditorActivity.EXTRA_VIEW_TARGET, node.path));
     }
 
-    private void customizeGenerated(@NonNull ProjectFileTreeAdapter.Node node) {
-        if (node.path.isEmpty()) {
-            return;
-        }
-        File target = new File(node.path);
-        new MaterialAlertDialogBuilder(this)
-                .setTitle(R.string.file_explorer_menu_customize)
-                .setMessage(getString(R.string.file_explorer_customize_message, node.name))
-                .setPositiveButton(R.string.file_explorer_menu_customize, (dialog, which) -> {
-                    k(); // loading dialog from the base class
-                    new Thread(() -> {
-                        File parent = target.getParentFile();
-                        boolean ok = parent != null && (parent.exists() || parent.mkdirs());
-                        if (ok) {
-                            String content;
-                            try {
-                                content = new a.a.a.yq(getApplicationContext(), scId).getFileSrc(
-                                        node.name, jC.b(scId), jC.a(scId), jC.c(scId));
-                            } catch (Exception e) {
-                                content = "";
-                            }
-                            FileUtil.writeFile(target.getAbsolutePath(), content);
-                            ok = target.isFile();
-                        }
-                        boolean success = ok;
-                        runOnUiThread(() -> {
-                            h(); // hide loading dialog
-                            if (isFinishing() || isDestroyed() || binding == null) {
-                                return;
-                            }
-                            if (success) {
-                                catalog.markCustomized(toScRelative(target.getAbsolutePath()),
-                                        "", node.name);
-                                adapter.invalidate(target.getParentFile().getAbsolutePath());
-                                SketchwareUtil.toast(getString(R.string.file_explorer_customized_toast, node.name));
-                                openInEditor(target.getAbsolutePath());
-                            } else {
-                                SketchwareUtil.toastError(getString(R.string.file_explorer_error_create_failed));
-                            }
-                        });
-                    }, "CustomizeGenerated").start();
-                })
-                .setNegativeButton(R.string.common_word_cancel, null)
-                .show();
-    }
-
+    /**
+     * Returns a generated file to block mode by removing the user's own copy. The
+     * generated content itself is restored from project metadata.
+     */
     private void confirmResetToGenerated(@NonNull ProjectFileTreeAdapter.Node node) {
-        ProjectFileCatalog.Entry entry = catalog.findByOverride(toScRelative(node.path));
-        if (entry == null) {
+        String override = workspace.overrideFor(node.path);
+        if (override == null || !FileUtil.isExistFile(override)) {
+            SketchwareUtil.toast(getString(R.string.file_explorer_no_own_copy));
             return;
         }
-        File parentFile = new File(node.path).getParentFile();
         new MaterialAlertDialogBuilder(this)
                 .setTitle(R.string.file_explorer_menu_reset_generated)
-                .setMessage(getString(R.string.file_explorer_reset_message, entry.title))
+                .setMessage(getString(R.string.file_explorer_reset_message, node.name))
                 .setPositiveButton(R.string.common_word_delete, (dialog, which) -> {
-                    FileUtil.deleteFile(node.path);
-                    catalog.removeByOverride(entry.overridePath);
+                    FileUtil.deleteFile(override);
+                    workspace.forgetOverride(node.path);
                     SketchwareUtil.toast(getString(R.string.file_explorer_reset_toast));
-                    if (parentFile != null) {
-                        adapter.invalidate(parentFile.getAbsolutePath());
-                    } else {
-                        adapter.invalidateAndReload();
-                    }
+                    // Regenerate so the tree shows block mode's version again.
+                    prepareWorkspace(true);
                 })
                 .setNegativeButton(R.string.common_word_cancel, null)
                 .show();
-    }
-
-    private void viewManifest() {
-        Intent intent = new Intent(getApplicationContext(),
-                com.besome.sketch.common.SrcViewerActivity.class);
-        intent.putExtra("sc_id", scId);
-        intent.putExtra("current", "AndroidManifest.xml");
-        startActivity(intent);
-    }
-
-    /** Opens Sketchware's manifest editor, where the manifest is actually editable. */
-    private void openManifestEditor() {
-        String firstActivity = "MainActivity.java";
-        try {
-            var manager = jC.b(scId);
-            var beans = manager == null ? null : manager.b();
-            if (beans != null && !beans.isEmpty() && beans.get(0).getJavaName() != null) {
-                firstActivity = beans.get(0).getJavaName();
-            }
-        } catch (Throwable ignored) {
-            // Fall back to the default activity name.
-        }
-        Intent intent = new Intent(getApplicationContext(),
-                mod.hilal.saif.activities.android_manifest.AndroidManifestInjection.class);
-        intent.putExtra("sc_id", scId);
-        intent.putExtra("file_name", firstActivity);
-        startActivity(intent);
     }
 
     //endregion
 
     //region Helpers
 
-    @NonNull
-    private String toScRelative(@NonNull String absolutePath) {
-        if (absolutePath.startsWith(filesRoot)) {
-            String relative = absolutePath.substring(filesRoot.length());
-            if (relative.startsWith(File.separator)) {
-                relative = relative.substring(1);
-            }
-            return "files/" + relative;
-        }
-        return absolutePath;
-    }
-
     private void openInEditor(@NonNull String path) {
         startActivity(new Intent(getApplicationContext(), ProjectCodeEditorActivity.class)
                 .putExtra(ProjectCodeEditorActivity.EXTRA_SC_ID, scId)
                 .putExtra(ProjectCodeEditorActivity.EXTRA_OPEN_PATH, path));
+    }
+
+    @Nullable
+    private String relativeToWorkspace(@NonNull String path) {
+        if (path.equals(workspaceRoot)) {
+            return "";
+        }
+        String prefix = workspaceRoot + File.separator;
+        return path.startsWith(prefix)
+                ? path.substring(prefix.length()).replace(File.separatorChar, '/')
+                : null;
+    }
+
+    /**
+     * Whether the file may be renamed. A file block mode owns belongs to its screen, and a
+     * build file's name is part of the build configuration, so neither can be renamed
+     * without breaking the project.
+     */
+    private boolean isRenamable(@NonNull ProjectFileTreeAdapter.Node node) {
+        if (node.generated) {
+            return false;
+        }
+        String relative = relativeToWorkspace(node.path);
+        if (relative == null || relative.isEmpty()) {
+            return false;
+        }
+        return !relative.equals("build.gradle")
+                && !relative.equals("settings.gradle")
+                && !relative.equals("gradle.properties")
+                && !relative.equals("app/build.gradle")
+                && !relative.equals("app/proguard-rules.pro");
     }
 
     @Nullable
@@ -1050,10 +1041,10 @@ public class ProjectFileExplorerActivity extends BaseAppCompatActivity
         String name = target.getName().toLowerCase(Locale.ROOT);
         String template;
         if (name.endsWith(".java")) {
-            String simpleName = name.substring(0, name.length() - 5);
+            String simpleName = target.getName().substring(0, target.getName().length() - 5);
             template = "package " + resolveJavaPackage(target) + ";\n\npublic class " + simpleName + " {\n\n}\n";
         } else if (name.endsWith(".kt")) {
-            String simpleName = name.substring(0, name.length() - 3);
+            String simpleName = target.getName().substring(0, target.getName().length() - 3);
             template = "package " + resolveJavaPackage(target) + "\n\nclass " + simpleName + " {\n\n}\n";
         } else if (name.endsWith(".xml")) {
             template = "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n";
@@ -1064,7 +1055,7 @@ public class ProjectFileExplorerActivity extends BaseAppCompatActivity
         return target.isFile();
     }
 
-    /** Package a new source file belongs to, derived from its folder below {@code files/java}. */
+    /** Package a new source file belongs to, derived from its folder below the java root. */
     @NonNull
     private String resolveJavaPackage(@NonNull File target) {
         File parent = target.getParentFile();
@@ -1090,12 +1081,9 @@ public class ProjectFileExplorerActivity extends BaseAppCompatActivity
     @NonNull
     private String resolveAppPackageName() {
         try {
-            Map<String, Object> metadata = lC.b(scId);
-            if (metadata != null) {
-                Object packageName = metadata.get("my_sc_pkg_name");
-                if (packageName instanceof String && !((String) packageName).isEmpty()) {
-                    return (String) packageName;
-                }
+            Object packageName = a.a.a.lC.b(scId).get("my_sc_pkg_name");
+            if (packageName instanceof String && !((String) packageName).isEmpty()) {
+                return (String) packageName;
             }
         } catch (Exception ignored) {
             // Fall through to a generic package.
@@ -1108,7 +1096,7 @@ public class ProjectFileExplorerActivity extends BaseAppCompatActivity
     //region Manifest registration (custom activities/services)
 
     private boolean isRegisterableSource(@NonNull ProjectFileTreeAdapter.Node node) {
-        return ProjectFileTreeAdapter.TYPE_FILE == node.type
+        return !node.isDirectory()
                 && node.path.startsWith(javaRoot + File.separator)
                 && (node.name.endsWith(".java") || node.name.endsWith(".kt"));
     }
@@ -1134,9 +1122,7 @@ public class ProjectFileExplorerActivity extends BaseAppCompatActivity
             if (content.isEmpty()) {
                 return null;
             }
-            java.util.regex.Matcher matcher = java.util.regex.Pattern
-                    .compile("^\\s*package\\s+([\\w.]+)\\s*;?", java.util.regex.Pattern.MULTILINE)
-                    .matcher(content);
+            Matcher matcher = PACKAGE_DECLARATION.matcher(content);
             return matcher.find() ? matcher.group(1) : null;
         } catch (Exception e) {
             return null;
@@ -1176,15 +1162,14 @@ public class ProjectFileExplorerActivity extends BaseAppCompatActivity
     public boolean onOptionsItemSelected(@NonNull MenuItem item) {
         int itemId = item.getItemId();
         if (itemId == R.id.action_refresh) {
-            if (adapter != null) {
-                adapter.invalidateAndReload();
-            }
+            // A refresh means "make the tree match the project again", so it regenerates.
+            prepareWorkspace(true);
             return true;
         } else if (itemId == R.id.action_new_file) {
             promptCreate(true, defaultCreateTarget());
             return true;
         } else if (itemId == R.id.action_new_folder) {
-            promptCreate(false, filesRoot);
+            promptCreate(false, workspaceRoot);
             return true;
         } else if (itemId == R.id.action_import) {
             startImport(null);
@@ -1198,6 +1183,9 @@ public class ProjectFileExplorerActivity extends BaseAppCompatActivity
                     com.besome.sketch.common.SrcViewerActivity.class);
             intent.putExtra("sc_id", scId);
             startActivity(intent);
+            return true;
+        } else if (itemId == R.id.action_manifest_editor) {
+            openManifestEditor();
             return true;
         } else if (itemId == R.id.action_show_hidden) {
             showHiddenFiles = !showHiddenFiles;
@@ -1214,6 +1202,28 @@ public class ProjectFileExplorerActivity extends BaseAppCompatActivity
             return true;
         }
         return super.onOptionsItemSelected(item);
+    }
+
+    /**
+     * Opens Sketchware's manifest component screen, which manages the activities, services
+     * and receivers block mode knows about. The manifest file itself can also be edited as
+     * text directly from the tree.
+     */
+    private void openManifestEditor() {
+        String firstActivity = "MainActivity";
+        try {
+            var beans = a.a.a.jC.b(scId).b();
+            if (beans != null && !beans.isEmpty() && beans.get(0).getJavaName() != null) {
+                firstActivity = beans.get(0).getJavaName();
+            }
+        } catch (Throwable ignored) {
+            // Fall back to the default activity name.
+        }
+        Intent intent = new Intent(getApplicationContext(),
+                mod.hilal.saif.activities.android_manifest.AndroidManifestInjection.class);
+        intent.putExtra("sc_id", scId);
+        intent.putExtra("file_name", firstActivity);
+        startActivity(intent);
     }
 
     //endregion

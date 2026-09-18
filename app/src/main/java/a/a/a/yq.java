@@ -292,16 +292,42 @@ public class yq {
      * Generates top-level build.gradle, build.gradle for module ':app' and settings.gradle files.
      */
     public void generateGradleFiles() {
-        fileUtil.b(projectMyscPath + File.separator + "app" + File.separator + "build.gradle",
+        writeGradleFile(projectMyscPath + "app" + File.separator + "build.gradle", "app/build.gradle",
                 Lx.getBuildGradleString(VAR_DEFAULT_TARGET_SDK_VERSION, VAR_DEFAULT_MIN_SDK_VERSION, projectSettings.getValue(ProjectSettings.SETTING_TARGET_SDK_VERSION, String.valueOf(VAR_DEFAULT_TARGET_SDK_VERSION)), N, projectSettings.getValue(ProjectSettings.SETTING_ENABLE_VIEWBINDING, ProjectSettings.SETTING_GENERIC_VALUE_FALSE).equals(ProjectSettings.SETTING_GENERIC_VALUE_TRUE)));
-        fileUtil.b(projectMyscPath + File.separator + "settings.gradle", Lx.a());
-        fileUtil.b(projectMyscPath + File.separator + "build.gradle", Lx.c("8.12.0", "4.4.3"));
-
-        fileUtil.b(projectMyscPath + File.separator + "gradle.properties", """
+        writeGradleFile(projectMyscPath + "settings.gradle", "settings.gradle", Lx.a());
+        writeGradleFile(projectMyscPath + "build.gradle", "build.gradle", Lx.c("8.12.0", "4.4.3"));
+        writeGradleFile(projectMyscPath + "gradle.properties", "gradle.properties", """
                 android.enableR8.fullMode=false
                 android.enableJetifier=true
                 android.useAndroidX=true
                 """.trim());
+    }
+
+    /**
+     * Writes a build file, preferring the project's own copy if one exists.
+     * <p>
+     * A user who edits a build file in Code Mode owns it from then on: its content lives
+     * at {@code .sketchware/data/<sc_id>/files/gradle/<name>} and replaces the generated
+     * template here, so the edit is not silently overwritten by the next build. Projects
+     * without such a file are unaffected.
+     */
+    private void writeGradleFile(String destination, String name, String generatedContent) {
+        String override = wq.b(sc_id) + "/files/gradle/" + name;
+        if (FileUtil.isExistFile(override)) {
+            fileUtil.b(destination, FileUtil.readFile(override));
+        } else {
+            fileUtil.b(destination, generatedContent);
+        }
+    }
+
+    /**
+     * Whether a generated file is replaced by one of the project's own files, which the
+     * compiler then reads directly. Writing the generated version too would produce two
+     * definitions of the same resource, so its workspace copy is skipped.
+     */
+    private boolean isReplacedByUserFile(String fileName) {
+        return (fileName.equals("strings.xml") || fileName.equals("colors.xml") || fileName.equals("styles.xml"))
+                && FileUtil.isExistFile(wq.b(sc_id) + "/files/resource/values/" + fileName);
     }
 
     /**
@@ -694,6 +720,17 @@ public class yq {
         }
 
         for (SrcCodeBean bean : srcCodeBeans) {
+            if (bean.srcFileName.equals("AndroidManifest.xml")) {
+                /* A manifest the user edited in Code Mode owns its content from then on. */
+                String manifestOverride = wq.b(sc_id) + "/files/AndroidManifest.xml";
+                if (FileUtil.isExistFile(manifestOverride)) {
+                    a(bean.srcFileName, FileUtil.readFile(manifestOverride));
+                    continue;
+                }
+            } else if (isReplacedByUserFile(bean.srcFileName)) {
+                /* Compiled straight from files/resource; a second copy would collide. */
+                continue;
+            }
             a(bean.srcFileName, bean.source);
         }
         if (N.isFirebaseEnabled || N.isAdMobEnabled || N.isMapUsed) {

@@ -19,7 +19,6 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -32,10 +31,9 @@ import pro.sketchware.databinding.ItemProjectFileExplorerBinding;
  * Real, collapsible, lazily-loaded project file tree for Code Mode.
  * <p>
  * Model: a {@link Node} tree whose children are discovered on demand the first
- * time a folder is expanded (mirroring how a desktop/desktop-style file tree
- * behaves). Nothing is hardcoded: every directory child comes from the project's
- * own directory listing, and the activity merges virtual entries for
- * block-generated files in through {@link ChildrenProvider}.
+ * time a folder is expanded (mirroring how a desktop file tree behaves). Nothing
+ * is hardcoded or faked: every row is a file or directory that really exists in
+ * the project's Android project directory, listed through {@link ChildrenProvider}.
  * <p>
  * Expansion state lives here (keyed by absolute path) so it survives refreshes,
  * rotation and re-entry, and is exposed via {@link #getExpandedPaths()} for
@@ -46,18 +44,6 @@ public final class ProjectFileTreeAdapter extends RecyclerView.Adapter<RecyclerV
     /** Node kinds. Directories are expandable, the rest are leaves. */
     public static final int TYPE_DIRECTORY = 0;
     public static final int TYPE_FILE = 1;
-    /**
-     * File that block mode generates and that has no on-disk copy yet. It can be
-     * opened read-only and "customized" into a real {@link #TYPE_FILE}.
-     */
-    public static final int TYPE_GENERATED = 2;
-
-    /**
-     * {@code AndroidManifest.xml}: generated from project metadata, so it has no
-     * override file and is edited through Sketchware's manifest editor instead.
-     * Other generated kinds come from {@link ProjectSourceIndex}.
-     */
-    public static final String KIND_MANIFEST = "manifest";
 
     /** Supplies the children of a directory. Implementations may do file I/O. */
     public interface ChildrenProvider {
@@ -86,16 +72,13 @@ public final class ProjectFileTreeAdapter extends RecyclerView.Adapter<RecyclerV
         public final int type;
         @NonNull
         public final String name;
-        /**
-         * Absolute path. For {@link #TYPE_GENERATED} nodes this is the path the
-         * file would occupy once customized into the project.
-         */
+        /** Absolute path of the real file or directory this row represents. */
         @NonNull
         public final String path;
-        @Nullable
-        public final String generatedKind;
-        /** For {@link #TYPE_FILE}: this file overrides a block-generated file. */
-        public final boolean customized;
+        /** Block mode generates this file, so the generator owns its content. */
+        public final boolean generated;
+        /** The user has their own copy of this generated file, which the build compiles. */
+        public final boolean overridden;
         /** Number of direct children, or -1 when not applicable. */
         public final int childCount;
         /** Current depth, assigned while flattening. */
@@ -106,12 +89,12 @@ public final class ProjectFileTreeAdapter extends RecyclerView.Adapter<RecyclerV
         public boolean loading;
 
         public Node(int type, @NonNull String name, @NonNull String path,
-                    @Nullable String generatedKind, boolean customized, int childCount) {
+                    boolean generated, boolean overridden, int childCount) {
             this.type = type;
             this.name = name;
             this.path = path;
-            this.generatedKind = generatedKind;
-            this.customized = customized;
+            this.generated = generated;
+            this.overridden = overridden;
             this.childCount = childCount;
         }
 
@@ -475,7 +458,6 @@ public final class ProjectFileTreeAdapter extends RecyclerView.Adapter<RecyclerV
         vh.boundPath = node.path;
 
         vh.binding.icon.setImageResource(iconFor(node));
-        vh.binding.icon.setAlpha(node.type == TYPE_GENERATED ? 0.7f : 1f);
 
         bindBadge(vh, node, expanded);
         vh.binding.getRoot().setOnClickListener(v -> listener.onNodeClicked(node));
@@ -488,12 +470,12 @@ public final class ProjectFileTreeAdapter extends RecyclerView.Adapter<RecyclerV
     }
 
     private void bindBadge(@NonNull NodeViewHolder vh, @NonNull Node node, boolean expanded) {
-        if (node.type == TYPE_GENERATED) {
-            vh.binding.badge.setVisibility(View.VISIBLE);
-            vh.binding.badge.setText(R.string.file_explorer_badge_generated);
-        } else if (node.customized) {
+        if (node.overridden) {
             vh.binding.badge.setVisibility(View.VISIBLE);
             vh.binding.badge.setText(R.string.file_explorer_badge_customized);
+        } else if (node.generated) {
+            vh.binding.badge.setVisibility(View.VISIBLE);
+            vh.binding.badge.setText(R.string.file_explorer_badge_generated);
         } else if (node.isDirectory() && !expanded && node.childCount > 0) {
             vh.binding.badge.setVisibility(View.VISIBLE);
             vh.binding.badge.setText(String.format(Locale.getDefault(), "%d", node.childCount));
@@ -554,11 +536,11 @@ public final class ProjectFileTreeAdapter extends RecyclerView.Adapter<RecyclerV
             return a.type == b.type
                     && a.depth == b.depth
                     && a.expanded == b.expanded
-                    && a.customized == b.customized
+                    && a.generated == b.generated
+                    && a.overridden == b.overridden
                     && a.childCount == b.childCount
                     && a.name.equals(b.name)
-                    && a.loading == b.loading
-                    && Objects.equals(a.generatedKind, b.generatedKind);
+                    && a.loading == b.loading;
         }
     }
 
@@ -576,24 +558,19 @@ public final class ProjectFileTreeAdapter extends RecyclerView.Adapter<RecyclerV
     /** Convenience: a directory node with an immediate child count. */
     @NonNull
     public static Node directory(@NonNull String name, @NonNull String path, int childCount) {
-        return new Node(TYPE_DIRECTORY, name, path, null, false, childCount);
+        return new Node(TYPE_DIRECTORY, name, path, false, false, childCount);
     }
 
     /** Convenience: a real on-disk file node. */
     @NonNull
-    public static Node file(@NonNull String name, @NonNull String path, boolean customized) {
-        return new Node(TYPE_FILE, name, path, null, customized, -1);
-    }
-
-    /** Convenience: a block-generated file that has no on-disk copy yet. */
-    @NonNull
-    public static Node generated(@NonNull String name, @NonNull String path, @Nullable String kind) {
-        return new Node(TYPE_GENERATED, name, path, kind, false, -1);
+    public static Node file(@NonNull String name, @NonNull String path,
+                            boolean generated, boolean overridden) {
+        return new Node(TYPE_FILE, name, path, generated, overridden, -1);
     }
 
     /** Convenience: the project root row. */
     @NonNull
     public static Node project(@NonNull String name, @NonNull String path) {
-        return new Node(TYPE_DIRECTORY, name, path, null, false, -1);
+        return new Node(TYPE_DIRECTORY, name, path, false, false, -1);
     }
 }

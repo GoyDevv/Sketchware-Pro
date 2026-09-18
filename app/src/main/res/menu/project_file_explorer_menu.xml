@@ -28,6 +28,11 @@
         app:showAsAction="never" />
 
     <item
+        android:id="@+id/action_manifest_editor"
+        android:title="@string/file_explorer_menu_manifest_editor"
+        app:showAsAction="never" />
+
+    <item
         android:id="@+id/action_show_hidden"
         android:checkable="true"
         android:title="@string/file_explorer_menu_show_hidden"
