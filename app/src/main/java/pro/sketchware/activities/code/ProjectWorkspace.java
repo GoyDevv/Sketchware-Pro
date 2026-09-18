@@ -79,6 +79,14 @@ public final class ProjectWorkspace {
      */
     public static final String INDEX_FILE_NAME = ".sketchcode-index.json";
 
+    /**
+     * Token proving that the workspace a materialization is filling is still the one it
+     * created. A build deletes the whole workspace before regenerating it, so noticing
+     * this file's disappearance means a build has taken over and the rest of the
+     * materialization must stop rather than write into the build's directory.
+     */
+    private static final String TOKEN_FILE_NAME = ".sketchcode-materializing";
+
     private static final Pattern PACKAGE_DECLARATION =
             Pattern.compile("(?m)^\\s*package\\s+([\\w.]+)\\s*;");
 
@@ -193,6 +201,11 @@ public final class ProjectWorkspace {
         yq generator = new yq(context, scId);
         generator.c(context);
         generator.a();
+        // Claim the workspace we just created, so this materialization knows whether it
+        // is still working on its own directory (see TOKEN_FILE_NAME).
+        File token = new File(root, TOKEN_FILE_NAME);
+        FileUtil.writeFile(token.getAbsolutePath(), scId);
+
         try {
             // Base resources every project has (themes, launcher icons, ...).
             generator.a(context, wq.e("600"));
@@ -210,11 +223,20 @@ public final class ProjectWorkspace {
         // AndroidManifest.xml, build.gradle, settings.gradle, gradle.properties.
         generator.b(projectFiles, dataManager, libraryManager, builder.getBuiltInLibraryManager());
 
+        if (!token.isFile()) {
+            // A build took the workspace over while we generated; its version is authoritative.
+            return;
+        }
+
         Index index = new Index();
         index.overrides = new LinkedHashMap<>();
         mirrorUserFiles(scId, root, generator, index.overrides);
+        if (!token.isFile()) {
+            return;
+        }
         index.stamp = metadataStamp(scId);
         writeIndex(root, index);
+        FileUtil.deleteFile(token.getAbsolutePath());
     }
 
     //endregion
